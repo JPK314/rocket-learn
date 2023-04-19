@@ -302,9 +302,9 @@ class RedisRolloutWorker:
                 versions = [v if v != -1 else latest_version for v in versions]
                 ratings = ["na"] * len(versions)
             else:
-                versions, ratings, evaluate = self.matchmaker.generate_matchup(self.redis,
-                                                                               blue + orange,
-                                                                               evaluate)
+                versions, ratings, evaluate, blue, orange = self.matchmaker.generate_matchup(self.redis,
+                                                                                             blue + orange,
+                                                                                             evaluate)
                 agents = []
                 for i, version in enumerate(versions):
                     if version == -1:
