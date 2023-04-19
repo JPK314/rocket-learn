@@ -288,7 +288,6 @@ class RedisRolloutWorker:
                 orange = 0
             else:
                 blue = orange = self.match.agents // 2
-            self.set_team_size(blue, orange)
 
             if self.human_agent:
                 n_new = blue + orange - 1
@@ -334,6 +333,8 @@ class RedisRolloutWorker:
                             else:
                                 raise ValueError("Unknown version type")
                         agents.append(selected_agent)
+
+            self.set_team_size(blue, orange)
 
             table_str = self.make_table(versions, ratings, blue, orange)
 
