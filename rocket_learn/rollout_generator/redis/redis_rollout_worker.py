@@ -340,7 +340,7 @@ class RedisRolloutWorker:
 
             if evaluate and not self.streamer_mode and self.human_agent is None:
                 print("EVALUATION GAME\n" + table_str)
-                result = rocket_learn.utils.generate_episode.generate_episode(self.env, agents, evaluate=True,
+                result = rocket_learn.utils.generate_episode.generate_episode(self.env, agents, versions, evaluate=True,
                                                                               scoreboard=self.scoreboard,
                                                                               progress=self.live_progress,
                                                                               selector_skip_k=self.selector_skip_k,
@@ -355,7 +355,7 @@ class RedisRolloutWorker:
 
                 try:
                     rollouts, result = rocket_learn.utils.generate_episode.generate_episode(
-                        self.env, agents,
+                        self.env, agents, versions,
                         evaluate=False,
                         scoreboard=self.scoreboard,
                         selector_skip_k=self.selector_skip_k,
