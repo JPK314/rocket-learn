@@ -49,13 +49,13 @@ class Matchmaker(BaseMatchmaker):
     def generate_matchup(self, redis, n_agents, evaluate):
         full_team_match = np.random.random() < (
             self.full_team_evaluations if evaluate else self.full_team_trainings)
+        if evaluate:
+            n_agents = np.random.choice([2, 4, 6])
         if full_team_match:
             n_picks = 2
         else:
             n_picks = n_agents
-        if evaluate:
-            n_agents = np.random.choice([2, 4, 6])
-        else:
+        if not evaluate:
             n_non_latest = np.random.choice(
                 len(self.non_latest_version_prob), p=self.non_latest_version_prob)
             if full_team_match:
@@ -234,6 +234,8 @@ class Matchmaker(BaseMatchmaker):
                 ratings += [ratings_values_pool[chosen_idx]]
 
             # We now have all the versions and ratings that will be used in parallel lists. Now weight all permutations of matches by fairness and pick one
+            if len(versions) != n_agents:
+                print("what??")
             matchups = []
             qualities = []
             for team1 in itertools.combinations(range(n_agents), per_team):
