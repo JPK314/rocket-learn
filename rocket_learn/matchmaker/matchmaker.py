@@ -97,21 +97,29 @@ class Matchmaker(BaseMatchmaker):
         # We also have the pretrained agents' ratings (the ones that have eval set to true, that is)
         if self.consider_pretrained:
             pretrained_ratings = get_pretrained_ratings(gamemode, redis)
-            pretrained_ratings_items = [p for p in pretrained_ratings.items(
-            ) if "-".join(p[0].split("-")[:-1]) in self.pretrained_eval_keys or p[0] in self.pretrained_eval_keys]
-            if pretrained_ratings_items:
+            # Actually, we need all the ratings, but we'll split out the ones just to be used in the eval pool
+            pretrained_ratings_items = pretrained_ratings.items()
+            if pretrained_ratings.items():
                 pretrained_ratings_keys, pretrained_ratings_values = zip(
                     *pretrained_ratings_items)
             else:
                 pretrained_ratings_keys = ()
                 pretrained_ratings_values = ()
+            pretrained_ratings_items_eval = [p for p in pretrained_ratings_items if "-".join(
+                p[0].split("-")[:-1]) in self.pretrained_eval_keys or p[0] in self.pretrained_eval_keys]
+            if pretrained_ratings_items_eval:
+                pretrained_ratings_keys_eval, pretrained_ratings_values_eval = zip(
+                    *pretrained_ratings_items_eval)
+            else:
+                pretrained_ratings_keys_eval = ()
+                pretrained_ratings_values_eval = ()
         else:
             pretrained_ratings = []
-            pretrained_ratings_keys = ()
-            pretrained_ratings_values = ()
+            pretrained_ratings_keys_eval = ()
+            pretrained_ratings_values_eval = ()
 
-        all_ratings_keys = past_version_ratings_keys + pretrained_ratings_keys
-        all_ratings_values = past_version_ratings_values + pretrained_ratings_values
+        all_ratings_keys = past_version_ratings_keys + pretrained_ratings_keys_eval
+        all_ratings_values = past_version_ratings_values + pretrained_ratings_values_eval
 
         if evaluate and len(all_ratings_keys) < n_picks:
             # Can't run evaluation game, not enough agents
