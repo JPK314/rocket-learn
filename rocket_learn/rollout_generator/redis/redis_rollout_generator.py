@@ -365,11 +365,13 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
 
         pretrained_qualities = {}
         for gamemode in self.gamemodes:
+            non_pretrained_min_rating = min(
+                [r.mu for r in get_ratings(gamemode, self.redis).values()])
             qualities = get_pretrained_ratings(gamemode, self.redis)
             pretrained_qualities[gamemode] = []
             for agent, rating in qualities.items():
                 pretrained_qualities[gamemode].append(
-                    (agent, rating.mu))
+                    (agent, rating.mu-non_pretrained_min_rating))
 
         for gamemode in self.gamemodes:
             self.logger.log({
