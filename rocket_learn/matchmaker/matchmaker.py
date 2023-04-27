@@ -51,10 +51,6 @@ class Matchmaker(BaseMatchmaker):
             self.full_team_evaluations if evaluate else self.full_team_trainings)
         if evaluate:
             n_agents = np.random.choice([2, 4, 6])
-        if full_team_match:
-            n_picks = 2
-        else:
-            n_picks = n_agents
         if not evaluate:
             n_non_latest = np.random.choice(
                 len(self.non_latest_version_prob), p=self.non_latest_version_prob)
@@ -64,14 +60,10 @@ class Matchmaker(BaseMatchmaker):
             else:
                 # We only want a maximum of half the agents to be non latest in training matchups
                 n_non_latest = min(n_agents // 2, n_non_latest)
-            if self.past_version_prob == 1:
-                n_past_version = n_non_latest
-            else:
-                n_past_version = np.random.binomial(
-                    n_non_latest, self.past_version_prob)
-                n_each_pretrained = np.random.multinomial(
-                    n_non_latest-n_past_version, self.pretrained_probs)
-            n_picks -= n_non_latest - n_past_version
+            n_past_version = np.random.binomial(
+                n_non_latest, self.past_version_prob)
+            n_each_pretrained = np.random.multinomial(
+                n_non_latest-n_past_version, self.pretrained_probs)
 
         per_team = n_agents // 2
         gamemode = f"{per_team}v{per_team}"
@@ -121,7 +113,7 @@ class Matchmaker(BaseMatchmaker):
         all_ratings_keys = past_version_ratings_keys + pretrained_ratings_keys_eval
         all_ratings_values = past_version_ratings_values + pretrained_ratings_values_eval
 
-        if evaluate and len(all_ratings_keys) < n_picks:
+        if evaluate and len(all_ratings_keys) < 2:
             # Can't run evaluation game, not enough agents
             return [latest_version] * n_agents, [latest_rating] * n_agents, False, n_agents // 2, n_agents // 2
 
@@ -151,8 +143,6 @@ class Matchmaker(BaseMatchmaker):
         else:
             versions = [chosen_first_key]
             ratings = [chosen_first_rating]
-
-        n_picks -= 1
 
         if not evaluate:
             # In a training match, we also need to add in the pretrained agents we have already decided upon
@@ -228,7 +218,8 @@ class Matchmaker(BaseMatchmaker):
                 mid = len(versions) // 2
                 return (versions[mid:] + versions[:mid]), (ratings[mid:] + ratings[:mid]), evaluate, n_agents // 2, n_agents // 2
         else:
-            chosen_idxs = np.random.choice(len(probs), size=n_picks, p=probs)
+            chosen_idxs = np.random.choice(
+                len(probs), size=n_agents - 1 if evaluate else n_past_version, p=probs)
             for chosen_idx in chosen_idxs:
                 versions += [ratings_keys_pool[chosen_idx]]
                 ratings += [ratings_values_pool[chosen_idx]]
