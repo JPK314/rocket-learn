@@ -358,6 +358,7 @@ class RedisRolloutWorker:
                         self.env, agents, versions,
                         evaluate=False,
                         scoreboard=self.scoreboard,
+                        progress=self.live_progress,
                         selector_skip_k=self.selector_skip_k,
                         force_selector_choice=self.force_selector_choice)
 

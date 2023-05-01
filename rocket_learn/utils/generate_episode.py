@@ -1,3 +1,4 @@
+import time
 from typing import List
 
 import numpy as np
@@ -71,119 +72,139 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
     ]
 
     b = o = 0
+    use_new = True
+    t0 = time.time()
     with torch.no_grad():
         tick = [0] * len(policies)
         do_selector = [True] * len(policies)
         last_actions = [None] * len(policies)
         while True:
-            # all_indices = []
-            # all_actions = []
-            # all_log_probs = []
-            all_indices = [None] * len(policies)
-            all_actions = [None] * len(policies)
-            all_log_probs = [None] * len(policies)
-
             # if observation isn't a list, make it one so we don't iterate over the observation directly
             if not isinstance(observations, list):
                 observations = [observations]
 
-            # get action indices, actions, and log probs for non pretrained agents
-            for idxs in policy_version_idx_dict.values():
-                policy = policies[idxs[0]]
-                if isinstance(observations[idxs[0]], tuple):
-                    obs = tuple(np.concatenate([obs[i] for idx, obs in enumerate(observations) if idx in idxs], axis=0)
-                                for i in range(len(observations[idxs[0]])))
-                else:
-                    obs = np.concatenate([obs for idx, obs in enumerate(
-                        observations) if idx in idxs], axis=0)
-                dist = policy.get_action_distribution(obs)
-                action_indices = policy.sample_action(dist)
-                log_probs = policy.log_prob(dist, action_indices)
-                action_indices_list = list(action_indices.numpy())
-                log_probs_list = list(log_probs.numpy())
-                for i, idx in enumerate(idxs):
-                    all_indices[idx] = action_indices_list[i]
-                    all_log_probs[idx] = log_probs_list[i]
-                    if do_selector[idx]:
-                        actions = policy.env_compatible(action_indices[i])
-                        last_actions[idx] = actions
+            if use_new:
+                all_indices = [None] * len(policies)
+                all_actions = [None] * len(policies)
+                all_log_probs = [None] * len(policies)
+                # get action indices, actions, and log probs for non pretrained agents
+                for idxs in policy_version_idx_dict.values():
+                    policy = policies[idxs[0]]
+                    if len(idxs) == 1:
+                        obs = observations[idxs[0]]
+                        dist = policy.get_action_distribution(obs)
+                        action_indices = policy.sample_action(dist)[0]
+                        log_probs = policy.log_prob(
+                            dist, action_indices).item()
+
+                        if do_selector[idxs[0]]:
+                            actions = policy.env_compatible(action_indices)
+                            last_actions[idxs[0]] = actions
+
+                        else:
+                            actions = last_actions[idxs[0]]
+
+                        all_indices[idxs[0]] = action_indices.numpy()
+                        all_actions[idxs[0]] = actions
+                        all_log_probs[idxs[0]] = log_probs
                     else:
-                        actions = last_actions[idx]
+                        if isinstance(observations[idxs[0]], tuple):
+                            obs = tuple(np.concatenate([obs[i] for idx, obs in enumerate(observations) if idx in idxs], axis=0)
+                                        for i in range(len(observations[idxs[0]])))
+                        else:
+                            obs = np.concatenate([obs for idx, obs in enumerate(
+                                observations) if idx in idxs], axis=0)
+                        dist = policy.get_action_distribution(obs)
+                        action_indices = policy.sample_action(dist)
+                        log_probs = policy.log_prob(dist, action_indices)
+                        action_indices_list = list(action_indices.numpy())
+                        log_probs_list = list(log_probs.numpy())
+                        for i, idx in enumerate(idxs):
+                            all_indices[idx] = action_indices_list[i]
+                            all_log_probs[idx] = log_probs_list[i]
+                            if do_selector[idx]:
+                                actions = policy.env_compatible(
+                                    action_indices[i])
+                                last_actions[idx] = actions
+                            else:
+                                actions = last_actions[idx]
+                            all_actions[idx] = actions
+
+                # get action indices, actions, and log probs for pretrained agents
+                for idx in pretrained_idxs:
+                    policy = policies[idx]
+                    actions = policy.act(last_state, idx)
+                    # make sure output is in correct format
+                    if not isinstance(observations, np.ndarray):
+                        actions = np.array(actions)
+
+                    # TODO: add converter that takes normal 8 actions into action space
+                    # actions = env._match._action_parser.convert_to_action_space(actions)
                     all_actions[idx] = actions
+            else:
+                all_indices = []
+                all_actions = []
+                all_log_probs = []
+                if not isinstance(policies[0], HardcodedAgent) and all(policy == policies[0] for policy in policies):
+                    policy = policies[0]
+                    if isinstance(observations[0], tuple):
+                        obs = tuple(np.concatenate([obs[i] for obs in observations], axis=0)
+                                    for i in range(len(observations[0])))
+                    else:
+                        obs = np.concatenate(observations, axis=0)
+                    dist = policy.get_action_distribution(obs)
+                    action_indices = policy.sample_action(dist)
+                    log_probs = policy.log_prob(dist, action_indices)
 
-            # get action indices, actions, and log probs for pretrained agents
-            for idx in pretrained_idxs:
-                policy = policies[idx]
-                actions = policy.act(last_state, idx)
-                # make sure output is in correct format
-                if not isinstance(observations, np.ndarray):
-                    actions = np.array(actions)
+                    if do_selector[0]:
+                        actions = policy.env_compatible(action_indices)
+                        last_actions = actions
 
-                # TODO: add converter that takes normal 8 actions into action space
-                # actions = env._match._action_parser.convert_to_action_space(actions)
-                all_actions[idx] = actions
+                    else:
+                        actions = last_actions
 
-            # The below code can be removed
-            # if not isinstance(policies[0], HardcodedAgent) and all(policy == policies[0] for policy in policies):
-            #     policy = policies[0]
-            #     if isinstance(observations[0], tuple):
-            #         obs = tuple(np.concatenate([obs[i] for obs in observations], axis=0)
-            #                     for i in range(len(observations[0])))
-            #     else:
-            #         obs = np.concatenate(observations, axis=0)
-            #     dist = policy.get_action_distribution(obs)
-            #     action_indices = policy.sample_action(dist)
-            #     log_probs = policy.log_prob(dist, action_indices)
+                    all_indices.extend(list(action_indices.numpy()))
+                    all_actions.extend(list(actions))
+                    all_log_probs.extend(list(log_probs.numpy()))
+                else:
+                    index = 0
+                    for policy, obs in zip(policies, observations):
+                        if isinstance(policy, HardcodedAgent):
+                            actions = policy.act(last_state, index)
 
-            #     if do_selector[0]:
-            #         actions = policy.env_compatible(action_indices)
-            #         last_actions = actions
+                            # make sure output is in correct format
+                            if not isinstance(observations, np.ndarray):
+                                actions = np.array(actions)
 
-            #     else:
-            #         actions = last_actions
+                            # TODO: add converter that takes normal 8 actions into action space
+                            # actions = env._match._action_parser.convert_to_action_space(actions)
 
-            #     all_indices.extend(list(action_indices.numpy()))
-            #     all_actions.extend(list(actions))
-            #     all_log_probs.extend(list(log_probs.numpy()))
-            # else:
-            #     index = 0
-            #     for policy, obs in zip(policies, observations):
-            #         if isinstance(policy, HardcodedAgent):
-            #             actions = policy.act(last_state, index)
+                            all_indices.append(None)
+                            all_actions.append(actions)
+                            all_log_probs.append(None)
 
-            #             # make sure output is in correct format
-            #             if not isinstance(observations, np.ndarray):
-            #                 actions = np.array(actions)
+                        elif isinstance(policy, Policy):
+                            dist = policy.get_action_distribution(obs)
+                            action_indices = policy.sample_action(dist)[0]
+                            log_probs = policy.log_prob(
+                                dist, action_indices).item()
 
-            #             # TODO: add converter that takes normal 8 actions into action space
-            #             # actions = env._match._action_parser.convert_to_action_space(actions)
+                            if do_selector[index]:
+                                actions = policy.env_compatible(action_indices)
+                                last_actions[index] = actions
 
-            #             all_indices.append(None)
-            #             all_actions.append(actions)
-            #             all_log_probs.append(None)
+                            else:
+                                actions = last_actions[index]
 
-            #         elif isinstance(policy, Policy):
-            #             dist = policy.get_action_distribution(obs)
-            #             action_indices = policy.sample_action(dist)[0]
-            #             log_probs = policy.log_prob(
-            #                 dist, action_indices).item()
+                            all_indices.append(action_indices.numpy())
+                            all_actions.append(actions)
+                            all_log_probs.append(log_probs)
 
-            #             if do_selector[index]:
-            #                 actions = policy.env_compatible(action_indices)
-            #                 last_actions[index] = actions
+                        else:
+                            print(str(type(policy)) + " type use not defined")
+                            assert False
 
-            #             else:
-            #                 actions = last_actions[index]
-
-            #             all_indices.append(action_indices.numpy())
-            #             all_actions.append(actions)
-            #             all_log_probs.append(log_probs)
-
-            #         else:
-            #             print(str(type(policy)) + " type use not defined")
-            #             assert False
-
-            #         index += 1
+                        index += 1
 
             if selector_skip_k is not None:
                 for i in range(len(do_selector)):
@@ -262,11 +283,13 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
                     observations, info = env.reset(return_info=True)
 
             last_state = info['state']
-
+    t1 = time.time()
     if scoreboard is not None:
         scoreboard.random_resets = random_resets  # noqa Checked above
 
     if progress is not None:
+        with open("new_changes.txt" if use_new else "old_changes.txt", mode="a") as f:
+            f.write(str(progress.n/(t1-t0)) + "\n")
         progress.close()
 
     if evaluate:
