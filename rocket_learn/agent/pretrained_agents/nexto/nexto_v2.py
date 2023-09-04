@@ -12,14 +12,12 @@ from rlgym.utils.gamestates import GameState
 
 import copy
 
-
 class NextoV2(HardcodedAgent):
-    def __init__(self, model_string, n_players, tick_skip_skip=4):
+    def __init__(self, model_string, n_players):
         cur_dir = os.path.dirname(os.path.realpath(__file__))
         self.actor = torch.jit.load(os.path.join(cur_dir, model_string))
         self.obs_builder = Nexto_V2_ObsBuilder(n_players=n_players)
         self.previous_action = np.array([0, 0, 0, 0, 0, 0, 0, 0])
-        self.tick_skip_skip = tick_skip_skip
 
         self._lookup_table = self.make_lookup_table()
 
@@ -33,8 +31,7 @@ class NextoV2(HardcodedAgent):
                     for handbrake in (0, 1):
                         if boost == 1 and throttle != 1:
                             continue
-                        actions.append(
-                            [throttle or boost, steer, 0, steer, 0, 0, boost, handbrake])
+                        actions.append([throttle or boost, steer, 0, steer, 0, 0, boost, handbrake])
         # Aerial
         for pitch in (-1, 0, 1):
             for yaw in (-1, 0, 1):
@@ -46,24 +43,20 @@ class NextoV2(HardcodedAgent):
                             if pitch == roll == jump == 0:  # Duplicate with ground
                                 continue
                             # Enable handbrake for potential wavedashes
-                            handbrake = jump == 1 and (
-                                pitch != 0 or yaw != 0 or roll != 0)
-                            actions.append(
-                                [boost, yaw, pitch, yaw, roll, jump, boost, handbrake])
+                            handbrake = jump == 1 and (pitch != 0 or yaw != 0 or roll != 0)
+                            actions.append([boost, yaw, pitch, yaw, roll, jump, boost, handbrake])
         actions = np.array(actions)
         return actions
 
     def act(self, state: GameState, player_index: int):
         player = state.players[player_index]
-        teammates = [p for p in state.players if p.team_num ==
-                     player.team_num and p != player]
+        teammates = [p for p in state.players if p.team_num == player.team_num and p != player]
         opponents = [p for p in state.players if p.team_num != player.team_num]
         necto_gamestate: GameState = copy.deepcopy(state)
         necto_gamestate.players = [player] + teammates + opponents
 
         self.obs_builder.reset(necto_gamestate)
-        obs = self.obs_builder.build_obs(
-            player, necto_gamestate, self.previous_action)
+        obs = self.obs_builder.build_obs(player, necto_gamestate, self.previous_action)
 
         obs = tuple(torch.from_numpy(s).float() for s in obs)
         with torch.no_grad():

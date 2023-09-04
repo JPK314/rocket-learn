@@ -4,70 +4,69 @@ import os
 import pstats
 import time
 import sys
-from typing import Iterator, List, Tuple, Union
+from typing import Iterator
+from collections import defaultdict
 
 import numba
 import numpy as np
 import torch
 import torch as th
-from torch.distributions import kl_divergence
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
 
 from rocket_learn.agent.actor_critic_agent import ActorCriticAgent
-from rocket_learn.agent.policy import Policy
 from rocket_learn.experience_buffer import ExperienceBuffer
 from rocket_learn.rollout_generator.base_rollout_generator import BaseRolloutGenerator
+from prettytable import PrettyTable
 
 
 class PPO:
     """
-        Proximal Policy Optimization algorithm (PPO)
+    Proximal Policy Optimization algorithm (PPO)
 
-        :param rollout_generator: Function that will generate the rollouts
-        :param agent: An ActorCriticAgent
-        :param n_steps: The number of steps to run per update
-        :param gamma: Discount factor
-        :param batch_size: batch size to break experience data into for training
-        :param epochs: Number of epoch when optimizing the loss
-        :param minibatch_size: size to break batch sets into (helps combat VRAM issues)
-        :param clip_range: PPO Clipping parameter for the value function
-        :param ent_coef: Entropy coefficient for the loss calculation
-        :param gae_lambda: Factor for trade-off of bias vs variance for Generalized Advantage Estimator
-        :param vf_coef: Value function coefficient for the loss calculation
-        :param max_grad_norm: optional clip_grad_norm value
-        :param logger: wandb logger to store run results
-        :param device: torch device
-        :param zero_grads_with_none: 0 gradient with None instead of 0
-        :param tick_skip_starts: a list of three tuples, from iteration 0, of (tick_skip, iteration_started, step_size)
+    :param rollout_generator: Function that will generate the rollouts
+    :param agent: An ActorCriticAgent
+    :param n_steps: The number of steps to run per update
+    :param gamma: Discount factor
+    :param batch_size: batch size to break experience data into for training
+    :param epochs: Number of epoch when optimizing the loss
+    :param minibatch_size: size to break batch sets into (helps combat VRAM issues)
+    :param clip_range: PPO Clipping parameter for the value function
+    :param ent_coef: Entropy coefficient for the loss calculation
+    :param gae_lambda: Factor for trade-off of bias vs variance for Generalized Advantage Estimator
+    :param vf_coef: Value function coefficient for the loss calculation
+    :param max_grad_norm: optional clip_grad_norm value
+    :param logger: wandb logger to store run results
+    :param device: torch device
+    :param zero_grads_with_none: 0 gradient with None instead of 0
+    :param tick_skip_starts: a list of three tuples, from iteration 0, of (tick_skip, iteration_started, step_size)
 
-        Look here for info on zero_grads_with_none
-        https://pytorch.org/docs/master/generated/torch.optim.Optimizer.zero_grad.html#torch.optim.Optimizer.zero_grad
+    Look here for info on zero_grads_with_none
+    https://pytorch.org/docs/master/generated/torch.optim.Optimizer.zero_grad.html#torch.optim.Optimizer.zero_grad
     """
 
     def __init__(
-            self,
-            rollout_generator: BaseRolloutGenerator,
-            agent: ActorCriticAgent,
-            n_steps=4096,
-            gamma=0.99,
-            batch_size=512,
-            epochs=10,
-            # reuse=2,
-            minibatch_size=None,
-            clip_range=0.2,
-            ent_coef=0.01,
-            gae_lambda=0.95,
-            vf_coef=1,
-            max_grad_norm=0.5,
-            logger=None,
-            device="cuda",
-            zero_grads_with_none=False,
-            kl_models_weights: List[Union[Tuple[Policy, float], Tuple[Policy, float, float]]] = None,
-            disable_gradient_logging=False,
-            action_selection_dict=None,
-            num_actions=0,
-            tick_skip_starts=None,
+        self,
+        rollout_generator: BaseRolloutGenerator,
+        agent: ActorCriticAgent,
+        n_steps=4096,
+        gamma=0.99,
+        batch_size=512,
+        epochs=10,
+        # reuse=2,
+        minibatch_size=None,
+        clip_range=0.2,
+        ent_coef=0.01,
+        gae_lambda=0.95,
+        vf_coef=1,
+        max_grad_norm=0.5,
+        logger=None,
+        device="cuda",
+        zero_grads_with_none=False,
+        disable_gradient_logging=False,
+        action_selection_dict=None,
+        num_actions=0,
+        tick_skip_starts=None,
     ):
         self.tick_skip_starts = tick_skip_starts
         self.num_actions = num_actions
@@ -80,7 +79,6 @@ class PPO:
         self.device = device
         self.zero_grads_with_none = zero_grads_with_none
         self.frozen_iterations = 0
-        self._saved_lr = None
 
         self.starting_iteration = 0
 
@@ -110,13 +108,6 @@ class PPO:
         self.timer = time.time_ns() // 1_000_000
         self.jit_tracer = None
 
-        if kl_models_weights is not None:
-            for i in range(len(kl_models_weights)):
-                assert len(kl_models_weights[i]) in (2, 3)
-                if len(kl_models_weights[i]) == 2:
-                    kl_models_weights[i] = kl_models_weights[i] + (None,)
-        self.kl_models_weights = kl_models_weights
-
     def update_reward_norm(self, rewards: np.ndarray) -> np.ndarray:
         batch_mean = np.mean(rewards)
         batch_var = np.var(rewards)
@@ -128,8 +119,14 @@ class PPO:
         new_mean = self.running_rew_mean + delta * batch_count / tot_count
         m_a = self.running_rew_var * self.running_rew_count
         m_b = batch_var * batch_count
-        m_2 = m_a + m_b + np.square(delta) * self.running_rew_count * batch_count / (
-                self.running_rew_count + batch_count)
+        m_2 = (
+            m_a
+            + m_b
+            + np.square(delta)
+            * self.running_rew_count
+            * batch_count
+            / (self.running_rew_count + batch_count)
+        )
         new_var = m_2 / (self.running_rew_count + batch_count)
 
         new_count = batch_count + self.running_rew_count
@@ -138,7 +135,9 @@ class PPO:
         self.running_rew_var = new_var
         self.running_rew_count = new_count
 
-        return (rewards - self.running_rew_mean) / np.sqrt(self.running_rew_var + 1e-8)  # TODO normalize before update?
+        return (rewards - self.running_rew_mean) / np.sqrt(
+            self.running_rew_var + 1e-8
+        )  # TODO normalize before update?
 
     def run(self, iterations_per_save=10, save_dir=None, save_jit=False):
         """
@@ -147,7 +146,9 @@ class PPO:
         :param save_dir: where to save
         """
         if save_dir:
-            current_run_dir = os.path.join(save_dir, self.logger.project + "_" + str(time.time()))
+            current_run_dir = os.path.join(
+                save_dir, self.logger.project + "_" + str(time.time())
+            )
             os.makedirs(current_run_dir)
         elif iterations_per_save and not save_dir:
             print("Warning: no save directory specified.")
@@ -180,7 +181,11 @@ class PPO:
             iteration += 1
 
             if save_dir:
-                self.save(os.path.join(save_dir, self.logger.project + "_" + "latest"), -1, save_jit)
+                self.save(
+                    os.path.join(save_dir, self.logger.project + "_" + "latest"),
+                    -1,
+                    save_jit,
+                )
                 if iteration % iterations_per_save == 0:
                     self.save(current_run_dir, iteration, save_jit)  # noqa
 
@@ -188,13 +193,12 @@ class PPO:
                 if self.frozen_iterations == 1:
                     print(" ** Unfreezing policy network **")
 
-                    assert self._saved_lr is not None
-                    self.agent.optimizer.param_groups[0]["lr"] = self._saved_lr
-                    self._saved_lr = None
+                    for param in self.agent.actor.parameters():
+                        param.requires_grad = True
 
                 self.frozen_iterations -= 1
-
-            self.rollout_generator.update_parameters(self.agent.actor)
+            else:
+                self.rollout_generator.update_parameters(self.agent.actor)
 
             # calculate years for graph
             if self.tick_skip_starts is not None:
@@ -208,11 +212,57 @@ class PPO:
 
             self.total_steps += self.n_steps  # size
             t1 = time.time()
-            self.logger.log({"ppo/steps_per_second": self.n_steps / (t1 - t0), "ppo/total_timesteps": self.total_steps})
-            print(f"fps: {self.n_steps / (t1 - t0)}\ttotal steps: {self.total_steps}")
-
-
-
+            self.logger.log(
+                {
+                    "ppo/steps_per_second": self.n_steps / (t1 - t0),
+                    "ppo/total_timesteps": self.total_steps,
+                }
+            )
+            # print(f"fps: {self.n_steps / (t1 - t0)}\ttotal steps: {self.total_steps}")
+            seconds = self.total_steps * 8 / 120
+            # def convert_time(seconds):
+            #    minute, second = divmod(seconds, 60)
+            #    hour, minute = divmod(minute, 60)
+            #    day, hour = divmod(hour, 24)
+            #    month, day = divmod(day, 30)
+            #    year, month = divmod(month, 12)
+            #    return (int(year), int(month), int(day), int(hour), int(minute), int(second))
+            #
+            # def convert_steps(total_steps):
+            #    if total_steps < 1000:
+            #        return total_steps, ""
+            #    elif 1000 <= total_steps < 1000000:
+            #        return total_steps / 1000, "K"
+            #    elif 1000000 <= total_steps < 1000000000:
+            #        return total_steps / 1000000, "M"
+            #    else:
+            #        return total_steps / 1000000000, "B"
+            # def color_table_pink(table):
+            #    for i in range(len(table._rows)):
+            #        for j in range(len(table._field_names)):
+            #            table._rows[i][j] = colored(table._rows[i][j], 'magenta') # Change The Color Here
+            #    return table
+            # times = convert_time(seconds)
+            # steps, step_unit = convert_steps(self.total_steps)
+            # x = PrettyTable()
+            # x.field_names = ["Unit", "Value", "Steps"]
+            # x.add_row(["", "", ""])
+            # x.add_row([colored("Finesse Has Trained For", 'yellow', attrs=['bold']), "", ""])
+            # x.add_row(["", "", ""])
+            # x.add_row([colored("Years", 'magenta', attrs=['bold']), colored(times[0], 'magenta', attrs=['bold']), ""])
+            # x.add_row([colored("Months", 'magenta', attrs=['bold']), colored(times[1], 'magenta', attrs=['bold']), ""])
+            # x.add_row([colored("Days", 'magenta', attrs=['bold']), colored(times[2], 'magenta', attrs=['bold']), ""])
+            # x.add_row([colored("Hours", 'magenta', attrs=['bold']), colored(times[3], 'magenta', attrs=['bold']), ""])
+            # x.add_row([colored("Minutes", 'magenta', attrs=['bold']), colored(times[4], 'magenta', attrs=['bold']), ""])
+            # x.add_row([colored("Seconds", 'magenta', attrs=['bold']), colored(times[5], 'magenta', attrs=['bold']), ""])
+            # x.add_row([colored("Steps", 'magenta', attrs=['bold']), colored(format(steps, ".2f"), 'magenta', attrs=['bold']), step_unit])
+            # x.add_row([colored("SPS", 'magenta', attrs=['bold']), colored(format(self.n_steps / (t1 - t0), ".2f"), 'magenta', attrs=['bold']), ""])
+            # print(color_table_pink(x))
+            # writer = tf.summary.create_file_writer("logs/PPO_0")
+            # with writer.as_default():
+            # tf.summary.scalar("ppo/steps_per_second", self.n_steps / (t1 - t0), step=self.total_steps)
+            # tf.summary.scalar("ppo/total_timesteps", self.total_steps, step=self.total_steps)
+            # tf.summary.scalar("time/time_elapsed", int(time_elapsed), step=iteration)
 
             # pr.disable()
             # s = io.StringIO()
@@ -242,9 +292,9 @@ class PPO:
         advantages = np.zeros_like(rewards)
         # v_targets = np.zeros_like(rewards)
         dones = np.zeros_like(rewards)
-        dones[-1] = 1. if not truncated else 0.
+        dones[-1] = 1.0 if not truncated else 0.0
         episode_starts = np.zeros_like(rewards)
-        episode_starts[0] = 1.
+        episode_starts[0] = 1.0
         last_values = values[-1]
         last_gae_lam = 0
         size = len(advantages)
@@ -285,7 +335,9 @@ class PPO:
         for buffer in buffers:  # Do discounts for each ExperienceBuffer individually
             if isinstance(buffer.observations[0], (tuple, list)):
                 transposed = tuple(zip(*buffer.observations))
-                obs_tensor = tuple(torch.from_numpy(np.vstack(t)).float() for t in transposed)
+                obs_tensor = tuple(
+                    torch.from_numpy(np.vstack(t)).float() for t in transposed
+                )
             else:
                 obs_tensor = th.from_numpy(np.vstack(buffer.observations)).float()
 
@@ -294,7 +346,9 @@ class PPO:
                     x = tuple(o.to(self.device) for o in obs_tensor)
                 else:
                     x = obs_tensor.to(self.device)
-                values = self.agent.critic(x).detach().cpu().numpy().flatten()  # No batching?
+                values = (
+                    self.agent.critic(x).detach().cpu().numpy().flatten()
+                )  # No batching?
 
             actions = np.stack(buffer.actions)
             log_probs = np.stack(buffer.log_probs)
@@ -303,13 +357,13 @@ class PPO:
 
             size = rewards.shape[0]
 
-            advantages = self._calculate_advantages_numba(rewards, values, self.gamma, self.gae_lambda, dones[-1] == 2)
+            advantages = self._calculate_advantages_numba(
+                rewards, values, self.gamma, self.gae_lambda, dones[-1] == 2
+            )
 
             returns = advantages + values
             if self.action_selection_dict is not None:
                 flat_actions = actions[:, 0].flatten()
-                # fold second half into first for boost stuff
-                flat_actions = np.where(flat_actions >= self.num_actions, flat_actions - self.num_actions, flat_actions)
                 unique, counts = np.unique(flat_actions, return_counts=True)
                 for i, value in enumerate(unique):
                     action_count[value] += counts[i]
@@ -326,17 +380,41 @@ class PPO:
             n += 1
         ep_rewards = np.array(ep_rewards)
         ep_steps = np.array(ep_steps)
+        ep_perstep_reward = ep_rewards.mean() / ep_steps.mean()
 
         total_steps = sum(ep_steps)
-        self.logger.log({
-            "ppo/ep_reward_mean": ep_rewards.mean(),
-            "ppo/ep_reward_std": ep_rewards.std(),
-            "ppo/ep_len_mean": ep_steps.mean(),
-            "submodel_swaps/action_changes": action_changes / total_steps,
-            "ppo/mean_reward_per_step": ep_rewards.mean() / ep_steps.mean(),
-            "ppo/abs_ep_reward_mean": np.abs(ep_rewards).sum() / ep_steps.mean(),
+        self.logger.log(
+            {
+                "ppo/ep_reward_mean": ep_rewards.mean(),
+                "ppo/ep_reward_std": ep_rewards.std(),
+                "ppo/ep_len_mean": ep_steps.mean(),
+                "ppo/mean_reward_per_step": ep_rewards.mean() / ep_steps.mean(),
+            },
+            step=iteration,
+            commit=False,
+        )
 
-        }, step=iteration, commit=False)
+        # if ep_perstep_reward < 0:
+        #    color = "red"
+        # else:
+        #    color = "green"
+        # print(colored(f"RewardsPerStep: {ep_perstep_reward}", color))
+        # mean_rewards = ep_rewards.mean()
+        # if mean_rewards < 0:
+        #    color = "red"
+        # else:
+        #    color = "green"
+        # print(colored(f"Rewards: {mean_rewards}", color))
+        # try:
+        #    with open('new_rollouts.txt', 'a') as f:
+        #        pass
+        # except FileNotFoundError:
+        #    with open('new_rollouts.txt', 'w') as f:
+        #        pass
+        # open('new_rollouts.txt', 'w').close()
+        # with open('new_rollouts.txt', 'a') as f:
+        #    f.write(f"RewardsPerStep: {ep_perstep_reward:.2f}\n")
+        #    f.write(f"Rewards: {mean_rewards:.2f}\n")
 
         if self.action_selection_dict is not None:
             for k, v in self.action_selection_dict.items():
@@ -345,7 +423,7 @@ class PPO:
                 ratio_used = count / total_steps
                 self.logger.log({name: ratio_used}, step=iteration, commit=False)
 
-        print(f"std, mean rewards: {ep_rewards.std()}\t{ep_rewards.mean()}")
+        # print(f"std, mean rewards: {ep_rewards.std()}\t{ep_rewards.mean()}")
 
         if isinstance(obs_tensors[0], tuple):
             transposed = zip(*obs_tensors)
@@ -364,10 +442,6 @@ class PPO:
         total_kl_div = 0
         tot_clipped = 0
 
-        if self.kl_models_weights is not None:
-            tot_kl_other_models = np.zeros(len(self.kl_models_weights))
-            tot_kl_coeffs = np.zeros(len(self.kl_models_weights))
-
         n = 0
 
         if self.jit_tracer is None:
@@ -378,12 +452,15 @@ class PPO:
         if self.frozen_iterations > 0:
             print("Policy network frozen, only updating value network...")
 
-        precompute = torch.cat([param.view(-1) for param in self.agent.actor.parameters()])
+        precompute = torch.cat(
+            [param.view(-1) for param in self.agent.actor.parameters()]
+        )
         t0 = time.perf_counter_ns()
         self.agent.optimizer.zero_grad(set_to_none=self.zero_grads_with_none)
         for e in range(self.epochs):
             # this is mostly pulled from sb3
-            indices = torch.randperm(returns_tensor.shape[0])[:self.batch_size]
+
+            indices = torch.randperm(returns_tensor.shape[0])[: self.batch_size]
             if isinstance(obs_tensor, tuple):
                 obs_batch = tuple(o[indices] for o in obs_tensor)
             else:
@@ -397,27 +474,42 @@ class PPO:
                 # Note: Will cut off final few samples
 
                 if isinstance(obs_tensor, tuple):
-                    obs = tuple(o[i: i + self.minibatch_size].to(self.device) for o in obs_batch)
+                    obs = tuple(
+                        o[i : i + self.minibatch_size].to(self.device)
+                        for o in obs_batch
+                    )
                 else:
-                    obs = obs_batch[i: i + self.minibatch_size].to(self.device)
+                    obs = obs_batch[i : i + self.minibatch_size].to(self.device)
 
-                act = act_batch[i: i + self.minibatch_size].to(self.device)
+                act = act_batch[i : i + self.minibatch_size].to(self.device)
                 # adv = advantages_batch[i:i + self.minibatch_size].to(self.device)
-                ret = returns_batch[i: i + self.minibatch_size].to(self.device)
+                ret = returns_batch[i : i + self.minibatch_size].to(self.device)
 
-                old_log_prob = log_prob_batch[i: i + self.minibatch_size].to(self.device)
+                old_log_prob = log_prob_batch[i : i + self.minibatch_size].to(
+                    self.device
+                )
 
                 # TODO optimization: use forward_actor_critic instead of separate in case shared, also use GPU
                 try:
-                    log_prob, entropy, dist = self.evaluate_actions(obs, act)  # Assuming obs and actions as input
+                    log_prob, entropy, dist = self.evaluate_actions(
+                        obs, act
+                    )  # Assuming obs and actions as input
+                except RuntimeError as e:
+                    print("RuntimeError in evaluate_actions", e)
+                    log_prob, entropy = self.evaluate_actions(
+                        obs, act
+                    )  # Assuming obs and actions as input
                 except ValueError as e:
                     print("ValueError in evaluate_actions", e)
                     continue
-                diff_log_prob = log_prob - old_log_prob
-                #  stabilize the ratio for small log prob
-                ratio = torch.where(diff_log_prob.abs() < 0.00005, 1 + diff_log_prob, torch.exp(diff_log_prob))
 
-                values_pred = self.agent.critic(obs)
+                ratio = torch.exp(log_prob - old_log_prob)
+
+                try:
+                    values_pred = self.agent.critic(obs)
+                except RuntimeError as e:
+                    print("RuntimeError in critic 2", e)
+                    values_pred = self.agent.critic(obs)
 
                 values_pred = th.squeeze(values_pred)
                 adv = ret - values_pred
@@ -425,7 +517,9 @@ class PPO:
 
                 # clipped surrogate loss
                 policy_loss_1 = adv * ratio
-                policy_loss_2 = adv * th.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range)
+                policy_loss_2 = adv * th.clamp(
+                    ratio, 1 - self.clip_range, 1 + self.clip_range
+                )
                 policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
 
                 # **If we want value clipping, add it here**
@@ -437,20 +531,11 @@ class PPO:
                 else:
                     entropy_loss = entropy
 
-                kl_loss = 0
-                if self.kl_models_weights is not None:
-                    for k, (model, kl_coef, half_life) in enumerate(self.kl_models_weights):
-                        if half_life is not None:
-                            kl_coef *= 0.5 ** (self.total_steps / half_life)
-                        with torch.no_grad():
-                            dist_other = model.get_action_distribution(obs)
-                        div = kl_divergence(dist_other, dist).mean()
-                        tot_kl_other_models[k] += div
-                        tot_kl_coeffs[k] = kl_coef
-                        kl_loss += kl_coef * div
-
-                loss = ((policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss + kl_loss)
-                        / (self.batch_size / self.minibatch_size))
+                loss = (
+                    policy_loss
+                    + self.ent_coef * entropy_loss
+                    + self.vf_coef * value_loss
+                ) / (self.batch_size / self.minibatch_size)
 
                 if not torch.isfinite(loss).all():
                     print("Non-finite loss, skipping", n)
@@ -463,8 +548,20 @@ class PPO:
                     print("\tLog prob:", log_prob)
                     print("\tOld log prob:", old_log_prob)
                     print("\tEntropy:", entropy)
-                    print("\tActor has inf:", any(not p.isfinite().all() for p in self.agent.actor.parameters()))
-                    print("\tCritic has inf:", any(not p.isfinite().all() for p in self.agent.critic.parameters()))
+                    print(
+                        "\tActor has inf:",
+                        any(
+                            not p.isfinite().all()
+                            for p in self.agent.actor.parameters()
+                        ),
+                    )
+                    print(
+                        "\tCritic has inf:",
+                        any(
+                            not p.isfinite().all()
+                            for p in self.agent.critic.parameters()
+                        ),
+                    )
                     print("\tReward as inf:", not np.isfinite(ep_rewards).all())
                     if isinstance(obs, tuple):
                         for j in range(len(obs)):
@@ -481,7 +578,9 @@ class PPO:
                 tot_policy_loss += policy_loss.item()
                 tot_entropy_loss += entropy_loss.item()
                 tot_value_loss += value_loss.item()
-                tot_clipped += th.mean((th.abs(ratio - 1) > self.clip_range).float()).item()
+                tot_clipped += th.mean(
+                    (th.abs(ratio - 1) > self.clip_range).float()
+                ).item()
                 n += 1
                 # pb.update(self.minibatch_size)
 
@@ -496,26 +595,23 @@ class PPO:
 
         assert n > 0
 
-        postcompute = torch.cat([param.view(-1) for param in self.agent.actor.parameters()])
-
-        log_dict = {
-            "ppo/loss": tot_loss / n,
-            "ppo/policy_loss": tot_policy_loss / n,
-            "ppo/entropy_loss": tot_entropy_loss / n,
-            "ppo/value_loss": tot_value_loss / n,
-            "ppo/mean_kl": total_kl_div / n,
-            "ppo/clip_fraction": tot_clipped / n,
-            "ppo/epoch_time": (t1 - t0) / (1e6 * self.epochs),
-            "ppo/update_magnitude": th.dist(precompute, postcompute, p=2),
-        }
-
-        if self.kl_models_weights is not None and len(self.kl_models_weights) > 0:
-            log_dict.update({f"ppo/kl_div_model_{i}": tot_kl_other_models[i] / n
-                             for i in range(len(self.kl_models_weights))})
-            log_dict.update({f"ppo/kl_coeff_model_{i}": tot_kl_coeffs[i]
-                             for i in range(len(self.kl_models_weights))})
-
-        self.logger.log(log_dict, step=iteration, commit=False)  # Is committed after when calculating fps
+        postcompute = torch.cat(
+            [param.view(-1) for param in self.agent.actor.parameters()]
+        )
+        self.logger.log(
+            {
+                "ppo/loss": tot_loss / n,
+                "ppo/policy_loss": tot_policy_loss / n,
+                "ppo/entropy_loss": tot_entropy_loss / n,
+                "ppo/value_loss": tot_value_loss / n,
+                "ppo/mean_kl": total_kl_div / n,
+                "ppo/clip_fraction": tot_clipped / n,
+                "ppo/epoch_time": (t1 - t0) / (1e6 * self.epochs),
+                "ppo/update_magnitude": th.dist(precompute, postcompute, p=2),
+            },
+            step=iteration,
+            commit=False,
+        )  # Is committed after when calculating fps
 
     def load(self, load_location, continue_iterations=True):
         """
@@ -525,12 +621,12 @@ class PPO:
         """
 
         checkpoint = torch.load(load_location)
-        self.agent.actor.load_state_dict(checkpoint['actor_state_dict'])
-        self.agent.critic.load_state_dict(checkpoint['critic_state_dict'])
-        self.agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.agent.actor.load_state_dict(checkpoint["actor_state_dict"])
+        self.agent.critic.load_state_dict(checkpoint["critic_state_dict"])
+        self.agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
         if continue_iterations:
-            self.starting_iteration = checkpoint['epoch']
+            self.starting_iteration = checkpoint["epoch"]
             self.total_steps = checkpoint["total_steps"]
             print("Continuing training at iteration " + str(self.starting_iteration))
 
@@ -547,14 +643,17 @@ class PPO:
 
         os.makedirs(version_dir, exist_ok=current_step == -1)
 
-        torch.save({
-            'epoch': current_step,
-            "total_steps": self.total_steps,
-            'actor_state_dict': self.agent.actor.state_dict(),
-            'critic_state_dict': self.agent.critic.state_dict(),
-            'optimizer_state_dict': self.agent.optimizer.state_dict(),
-            # TODO save/load reward normalization mean, std, count
-        }, version_dir + "\\checkpoint.pt")
+        torch.save(
+            {
+                "epoch": current_step,
+                "total_steps": self.total_steps,
+                "actor_state_dict": self.agent.actor.state_dict(),
+                "critic_state_dict": self.agent.critic.state_dict(),
+                "optimizer_state_dict": self.agent.optimizer.state_dict(),
+                # TODO save/load reward normalization mean, std, count
+            },
+            version_dir + "\\checkpoint.pt",
+        )
 
         if save_actor_jit:
             traced_actor = th.jit.trace(self.agent.actor, self.jit_tracer)
@@ -575,5 +674,5 @@ class PPO:
 
         self.frozen_iterations = frozen_iterations
 
-        self._saved_lr = self.agent.optimizer.param_groups[0]["lr"]
-        self.agent.optimizer.param_groups[0]["lr"] = 0
+        for param in self.agent.actor.parameters():
+            param.requires_grad = False

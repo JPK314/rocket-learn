@@ -19,8 +19,7 @@ from rocket_learn.experience_buffer import ExperienceBuffer
 from rocket_learn.rollout_generator.base_rollout_generator import BaseRolloutGenerator
 from rocket_learn.rollout_generator.redis.utils import decode_buffers, _unserialize, PRETRAINED_QUALITIES, QUALITIES, _serialize, ROLLOUTS, \
     VERSION_LATEST, OPPONENT_MODELS, CONTRIBUTORS, N_UPDATES, MODEL_LATEST, _serialize_model, get_rating, get_ratings, \
-    get_pretrained_rating, get_pretrained_ratings, add_pretrained_ratings, _ALL, LATEST_RATING_ID, EXPERIENCE_PER_MODE,\
-    OPPONENT_MODEL_SELECTOR_SKIP
+    get_pretrained_rating, get_pretrained_ratings, add_pretrained_ratings, _ALL, LATEST_RATING_ID, EXPERIENCE_PER_MODE
 from rocket_learn.utils.stat_trackers.stat_tracker import StatTracker
 
 
@@ -46,31 +45,17 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
             gamemodes=("1v1", "2v2", "3v3"),
             pretrained_agents: PretrainedAgents = None,
             stat_trackers: Optional[List[StatTracker]] = None,
-            selector_skip_k=None,
-            selector_skip_schedule=None,
-            action_grouping_tracker=None,
     ):
-        self.action_grouping_tracker = action_grouping_tracker
         self.lastsave_ts = None
         self.name = name
         self.tot_bytes = 0
         self.redis = redis
-        self.selector_skip_k = selector_skip_k
-        self.selector_skip_schedule = None
-        if self.selector_skip_k is not None:
-            self.selector_skip_schedule = selector_skip_schedule
-            # do selector schedule based on n_updates here
-            n_updates = self.redis.get(N_UPDATES)
-            n_updates = 0 if n_updates is None else int(n_updates)
-            self.selector_skip_k = self.selector_skip_schedule(n_updates)
-            self.redis.set("selector_skip_k", self.selector_skip_k)
-        else:
-            self.redis.delete("selector_skip_k")
         self.logger = logger
+
         self.pretrained_agents_keys = []
         if pretrained_agents is not None:
             add_pretrained_ratings(
-                self.redis, pretrained_agents, gamemodes=gamemodes)
+            self.redis, pretrained_agents, gamemodes=gamemodes)
             for config in pretrained_agents.values():
                 self.pretrained_agents_keys.append(config["key"])
 
@@ -127,7 +112,7 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
         gamemode = f"{len(versions) // 2}v{len(versions) // 2}"
 
         has_buffer_versions = [
-            v for v in versions if isinstance(v, int) or (v != "human" and ("-".join(v.split("-")[:-1]) not in self.pretrained_agents_keys and v not in self.pretrained_agents_keys))]
+           v for v in versions if isinstance(v, int) or (v != "human" and ("-".join(v.split("-")[:-1]) not in self.pretrained_agents_keys and v not in self.pretrained_agents_keys))]
         for version, buffer in itertools.zip_longest(has_buffer_versions, buffers):
             if isinstance(version, int) and version < 0:
                 if abs(version - latest_version) <= self.max_age:
@@ -192,8 +177,6 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
     def _reset_stats(self):
         for stat_tracker in self.stat_trackers:
             stat_tracker.reset()
-        if self.action_grouping_tracker is not None:
-            self.action_grouping_tracker.reset()
 
     def _update_stats(self, states, mask):
         if states is None:
@@ -205,8 +188,6 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
         stats = {}
         for stat_tracker in self.stat_trackers:
             stats[stat_tracker.name] = stat_tracker.get_stat()
-        if self.action_grouping_tracker is not None:
-            stats[self.action_grouping_tracker.name] = self.action_grouping_tracker.get_stat()
         return stats
 
     def generate_rollouts(self) -> Iterator[ExperienceBuffer]:
@@ -228,9 +209,6 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
                 if len(relevant_buffers) > 0:
                     self._update_stats(
                         states, [b in relevant_buffers for b in buffers])
-                    if self.action_grouping_tracker is not None:
-                        self.action_grouping_tracker.update(states, [b in relevant_buffers for b in buffers],
-                                                            [b.actions for b in relevant_buffers])
                 yield from relevant_buffers
 
     def _plot_ratings(self):
@@ -367,10 +345,6 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
                 self.redis.hset(QUALITIES.format(gamemode),
                                 f"{key}-{mode}", _serialize(tuple(quality)))
 
-        # set selector_skip_k for model if it exists
-        if self.selector_skip_k is not None:
-            self.redis.hset(OPPONENT_MODEL_SELECTOR_SKIP, key, self.selector_skip_k)
-
         # Inform that new opponent is ready
         self.redis.set(LATEST_RATING_ID, key)
 
@@ -382,13 +356,6 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
         model_bytes = _serialize_model(new_params)
         self.redis.set(MODEL_LATEST, model_bytes)
         self.redis.decr(VERSION_LATEST)
-
-        print("Top contributors:\n" +
-              "\n".join(f"\t{c}: {n}" for c, n in self.contributors.most_common(5)))
-        self.logger.log({
-            "redis/contributors": wandb.Table(columns=["name", "steps"], data=self.contributors.most_common())},
-            commit=False
-        )
 
         # Add pretrained agents' tables if any pretrained agents were passed into init
         if self.pretrained_agents_keys:
@@ -438,13 +405,6 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
                             value in self._get_stats().items()}, commit=False)
         self._reset_stats()
 
-        # do selector schedule based on n_updates here
-        if self.selector_skip_schedule is not None:
-            self.selector_skip_k = self.selector_skip_schedule(n_updates)
-            new_seconds = test_selector_skip(10_000, self.selector_skip_k)
-            self.logger.log({"Selector_skip_seconds": new_seconds}, commit=False)
-            self.redis.set("selector_skip_k", self.selector_skip_k)
-
         if n_updates % self.model_freq == 0:
             print("Adding model to pool...")
             self._add_opponent(model_bytes)
@@ -461,23 +421,83 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
                 print("redis bgsave failed, auto save already in progress")
 
 
-def test_selector_skip(x, selector_skip_k):
-    tick = 0
-    count = 0
-    ticks = []
-    for i in range(x):
-        do_selector = do_selector_action(selector_skip_k, tick) if selector_skip_k is not None else True
-        if do_selector:
-            ticks.append(tick)
-        tick = 0 if do_selector else tick + 1
-        count += 1 if do_selector else 0
-    ticks = np.asarray(ticks)
-    return np.mean(ticks) * (4 / 120)
 
-def do_selector_action(selector_skip_k, tick) -> bool:
-    p = 1 / (1 + (selector_skip_k * tick))
-    if np.random.uniform() < p:
-        return False
-    else:
-        return True
 
+
+
+
+
+
+
+
+
+#def update_parameters(self, new_params):
+#        """
+#        update redis (and thus workers) with new model data and save data as future opponent
+#        :param new_params: new model parameters
+#        """
+#        model_bytes = _serialize_model(new_params)
+#        self.redis.set(MODEL_LATEST, model_bytes)
+#        self.redis.decr(VERSION_LATEST)
+#
+#        print("Top contributors:\n" +
+#              "\n".join(f"\t{c}: {n}" for c, n in self.contributors.most_common(5)))
+#        self.logger.log({
+#            "redis/contributors": wandb.Table(columns=["name", "steps"], data=self.contributors.most_common())},
+#            commit=False
+#        )
+#
+#        pretrained_qualities = {}
+#        for gamemode in self.gamemodes:
+#            qualities = get_pretrained_ratings(gamemode, self.redis)
+#            pretrained_qualities[gamemode] = []
+#            for agent, rating in qualities.items():
+#                pretrained_qualities[gamemode].append(
+#                    (agent, rating.mu))
+#
+#        for gamemode in self.gamemodes:
+#            self.logger.log({
+#                "pretrained/qualities-" + gamemode: wandb.Table(columns=["name", "rating"], data=pretrained_qualities[gamemode])
+#            }, commit=False)
+#
+#        if self.gamemodes[0] != '1v0':
+#            self._plot_ratings()
+#        tot_contributors = self.redis.hgetall(CONTRIBUTORS)
+#        tot_contributors = Counter({name: int(count)
+#                                   for name, count in tot_contributors.items()})
+#        tot_contributors += self.contributors
+#        if tot_contributors:
+#            self.redis.hset(CONTRIBUTORS, mapping=tot_contributors)
+#        self.contributors.clear()
+#        stat_keys = self.redis.keys("selector_stat*")
+#        for key in stat_keys:
+#            value = self.redis.get(key)
+#            if value is not None:
+#                value = float(value)
+#                value = value / 2
+#                self.redis.set(key, str(int(value)))
+#        self.logger.log({"redis/rollout_bytes": self.tot_bytes}, commit=False)
+#        self.tot_bytes = 0
+#
+#        n_updates = self.redis.incr(N_UPDATES) - 1
+#        # save_freq = int(self.redis.get(SAVE_FREQ))
+#
+#        if n_updates > 0:
+#            self.logger.log({f"stat/{name}": value for name,
+#                            value in self._get_stats().items()}, commit=False)
+#        self._reset_stats()
+#
+#        if n_updates % self.model_freq == 0:
+#            print("Adding model to pool...")
+#            self._add_opponent(model_bytes)
+#
+#        if n_updates % self.save_freq == 0:
+#            # self.redis.set(MODEL_N.format(self.n_updates // self.save_every), model_bytes)
+#            print("Saving model...")
+#            if self.lastsave_ts == self.redis.lastsave():
+#                print("redis save error, previous bgsave failed")
+#            self.lastsave_ts = self.redis.lastsave()
+#            try:
+#                self.redis.bgsave()
+#            except ResponseError:
+#                print("redis bgsave failed, auto save already in progress")

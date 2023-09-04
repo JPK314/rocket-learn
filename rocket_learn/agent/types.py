@@ -1,4 +1,5 @@
-from typing import TypedDict, Dict, Optional
+from typing import Dict, Optional
+from typing_extensions import TypedDict
 
 from rocket_learn.agent.pretrained_policy import HardcodedAgent
 

@@ -12,7 +12,7 @@ class BatchedObsBuilder(ObsBuilder):
     def __init__(self, scoreboard: Optional[Scoreboard] = None):
         super().__init__()
         self.current_state = None
-        self.current_obs = None
+        self.current_obs = []
         self.scoreboard = scoreboard
 
     def batched_build_obs(self, encoded_states: np.ndarray) -> Any:

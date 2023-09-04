@@ -19,7 +19,7 @@ class DiscretePolicy(Policy):
         logits = self.net(obs)
         return logits
 
-    def get_action_distribution(self, obs, initial_choice_block_indices=None):
+    def get_action_distribution(self, obs):
         if isinstance(obs, np.ndarray):
             obs = th.from_numpy(obs).float()
         elif isinstance(obs, tuple):
@@ -29,11 +29,6 @@ class DiscretePolicy(Policy):
 
         if isinstance(logits, th.Tensor):
             logits = (logits,)
-
-        if initial_choice_block_indices is not None:
-            for i in range(len(logits[0])):
-                for j in initial_choice_block_indices:
-                    logits[0][i][j] = -th.inf
 
         max_shape = max(self.shape)
         logits = th.stack(
