@@ -357,6 +357,7 @@ class PPO:
             rewards = np.stack(buffer.rewards)
             dones = np.stack(buffer.dones)
             aux_losses = np.stack(buffer.aux_losses)
+            
 
             size = rewards.shape[0]
 
