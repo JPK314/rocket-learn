@@ -17,8 +17,7 @@ from rocket_learn.utils.truncated_condition import TruncatedCondition
 from rocket_learn.utils.truncated_condition import TerminalToTruncatedWrapper
 
 
-def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), evaluate=False, scoreboard=None, progress=True, selector_skip_k=None,
-                     force_selector_choice=None) -> (List[ExperienceBuffer], int):  # type: ignore
+def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), evaluate=False, scoreboard=None, progress=True) -> (List[ExperienceBuffer], int):  # type: ignore
     """
     create experience buffer data by interacting with the environment(s)
     """
@@ -72,11 +71,11 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
         for _ in range(sum(latest_policy_indices))
     ]
 
+    trajectory_states = []
+    body_outs = [[] for _ in range(sum(latest_policy_indices))]
+
     b = o = 0
     with torch.no_grad():
-        tick = [0] * len(policies)
-        do_selector = [True] * len(policies)
-        last_actions = [None] * len(policies)
         while True:
             # all_indices = []
             # all_actions = []
@@ -84,6 +83,7 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
             all_indices = [None] * len(policies)
             all_actions = [None] * len(policies)
             all_log_probs = [None] * len(policies)
+            all_body_outs = [None] * len(policies)
 
             # if observation isn't a list, make it one so we don't iterate over the observation directly
             if not isinstance(observations, list):
@@ -98,20 +98,17 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
                 else:
                     obs = np.concatenate([obs for idx, obs in enumerate(
                         observations) if idx in idxs], axis=0)
-                dist = policy.get_action_distribution(obs)
+                body_out = policy(obs)
+                dist = policy.get_action_distribution(body_out)
                 action_indices = policy.sample_action(dist)
                 log_probs = policy.log_prob(dist, action_indices)
                 action_indices_list = list(action_indices.numpy())
                 log_probs_list = list(log_probs.numpy())
                 for i, idx in enumerate(idxs):
+                    all_body_outs[idx] = body_out[i]
                     all_indices[idx] = action_indices_list[i]
                     all_log_probs[idx] = log_probs_list[i]
-                    if do_selector[idx]:
-                        actions = policy.env_compatible(action_indices[i])
-                        last_actions[idx] = actions
-                    else:
-                        actions = last_actions[idx]
-                    all_actions[idx] = actions
+                    all_actions[idx] = policy.env_compatible(action_indices[i])
 
             # get action indices, actions, and log probs for pretrained agents
             for idx in pretrained_idxs:
@@ -124,20 +121,6 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
                 # TODO: add converter that takes normal 8 actions into action space
                 # actions = env._match._action_parser.convert_to_action_space(actions)
                 all_actions[idx] = actions
-
-
-            if selector_skip_k is not None:
-                for i in range(len(do_selector)):
-                    if not isinstance(policies[i], HardcodedAgent):
-                        do_selector[i] = do_selector_action(
-                            selector_skip_k, tick[i])
-                        if policies[i].deterministic or force_selector_choice[i]:
-                            do_selector[i] = True
-                            force_selector_choice[i] = False
-            else:
-                do_selector = [True] * 6
-            for i in range(len(tick)):
-                tick[i] = 0 if do_selector[i] else tick[i] + 1
 
             # to allow different action spaces, pad out short ones to longest length (assume later unpadding in parser)
             length = max([a.shape[0] for a in all_actions])
@@ -168,6 +151,8 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
                 rewards) if latest_policy_indices[i] == 1]
             all_log_probs = [r for i, r in enumerate(
                 all_log_probs) if latest_policy_indices[i] == 1]
+            all_body_outs = [b for i, b in enumerate(
+                all_body_outs) if latest_policy_indices[i] == 1]
 
             assert len(old_obs) == len(all_indices), str(
                 len(old_obs)) + " obs, " + str(len(all_indices)) + " ind"
@@ -180,6 +165,9 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
 
             # Might be different if only one agent?
             if not evaluate:  # Evaluation matches can be long, no reason to keep them in memory
+                trajectory_states.append(info["state"])
+                for body_out_list, body_out in zip(body_outs, all_body_outs):
+                    body_out_list.append(body_out)
                 for exp_buf, obs, act, rew, log_prob in zip(rollouts, old_obs, all_indices, rewards, all_log_probs):
                     exp_buf.add_step(obs, act, rew, done + 2 * truncated, log_prob, info)
 
@@ -205,7 +193,7 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
                 else:
                     observations, info = env.reset(return_info=True)
 
-            last_state = info['state']
+            last_state = info["state"]
 
     if scoreboard is not None:
         scoreboard.random_resets = random_resets  # noqa Checked above
@@ -222,12 +210,4 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
         env._match._reward_fn = reward  # noqa
         return result
 
-    return rollouts, result
-
-
-def do_selector_action(selector_skip_k, tick) -> bool:
-    p = 1 / (1 + (selector_skip_k * tick))
-    if np.random.uniform() < p:
-        return False
-    else:
-        return True
+    return rollouts, result, body_outs, trajectory_states

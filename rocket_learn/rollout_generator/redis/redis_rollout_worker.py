@@ -322,10 +322,14 @@ class RedisRolloutWorker:
             else:
                 versions, ratings, evaluate = self.matchmaker.generate_matchup(self.redis, blue + orange,evaluate)
                 agents = []
+                latest_version_idxs = []
+                non_pretrained_idxs = []
                 for i, version in enumerate(versions):
                     if version == -1:
                         versions[i] = latest_version
                         agents.append(self.current_agent)
+                        latest_version_idxs.append(i)
+                        non_pretrained_idxs.append(i)
                     else:
                         # For instances of PretrainedDiscretePolicy, whose redis qualities keys end with -deterministic or -stochastic
                         short_name = "-".join(version.split("-")[:-1])
@@ -341,6 +345,7 @@ class RedisRolloutWorker:
                                     'stochastic', 'deterministic')
                                 version = version.replace(
                                     'stochastic', 'deterministic')
+                            non_pretrained_idxs.append(i)
 
                         if isinstance(selected_agent, DiscretePolicy):
                             if version.endswith("deterministic"):
@@ -373,12 +378,10 @@ class RedisRolloutWorker:
                     
 
                 try:
-                    rollouts, result = rocket_learn.utils.generate_episode.generate_episode(
+                    rollouts, result, body_outs, trajectory_states = rocket_learn.utils.generate_episode.generate_episode(
                         self.env, agents, versions,
                         evaluate=False,
-                        scoreboard=self.scoreboard,
-                        selector_skip_k=self.selector_skip_k,
-                        force_selector_choice=self.force_selector_choice)
+                        scoreboard=self.scoreboard)
 
                     # Happens sometimes, unknown reason
                     if len(rollouts[0].observations) <= 1:
@@ -390,6 +393,7 @@ class RedisRolloutWorker:
                     self.env.attempt_recovery()
                     continue
 
+                
                 state = rollouts[0].infos[-2]["state"]
                 goal_speed = np.linalg.norm(state.ball.linear_velocity) * 0.036  # kph
                 str_result = ('+' if result > 0 else "") + str(result)
@@ -408,8 +412,22 @@ class RedisRolloutWorker:
                     print(post_stats)
                     print()
 
+            if not self.streamer_mode:
+                # Get aux head losses here. Only need to do for latest versions
+                latest_version_bo_idxs = [i for i,idx in enumerate(non_pretrained_idxs) if idx in latest_version_idxs]
+                aux_losses = self.current_agent.get_aux_heads_loss([bo for i,bo in body_outs if i in latest_version_bo_idxs], trajectory_states)
+                all_aux_losses = [None] * len(versions)
+                aux_loss_idx = 0
+                for idx in range(len(versions)):
+                    if idx in latest_version_idxs:
+                        all_aux_losses[idx] = aux_losses[aux_loss_idx]
+                        aux_loss_idx += 1
+                
+
+
             if not self.streamer_mode and not self.batch_mode:
-                rollout_data = encode_buffers(rollouts,
+
+                rollout_data = encode_buffers(rollouts, all_aux_losses,
                                               return_obs=self.send_obs,
                                               return_states=self.send_gamestates,
                                               return_rewards=True)
@@ -438,7 +456,7 @@ class RedisRolloutWorker:
 
             elif not self.streamer_mode and self.batch_mode:
 
-                rollout_data = encode_buffers(rollouts,
+                rollout_data = encode_buffers(rollouts, all_aux_losses,
                                               return_obs=self.send_obs,
                                               return_states=self.send_gamestates,
                                               return_rewards=True)

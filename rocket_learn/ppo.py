@@ -325,6 +325,8 @@ class PPO:
 
         rewards_tensors = []
 
+        aux_loss_tensors = []
+
         ep_rewards = []
         ep_steps = []
         action_count = np.asarray([0] * self.num_actions)
@@ -354,6 +356,7 @@ class PPO:
             log_probs = np.stack(buffer.log_probs)
             rewards = np.stack(buffer.rewards)
             dones = np.stack(buffer.dones)
+            aux_losses = np.stack(buffer.aux_losses)
 
             size = rewards.shape[0]
 
@@ -374,6 +377,7 @@ class PPO:
             log_prob_tensors.append(th.from_numpy(log_probs))
             returns_tensors.append(th.from_numpy(returns))
             rewards_tensors.append(th.from_numpy(rewards))
+            aux_loss_tensors.append(th.from_numpy(aux_losses))
 
             ep_rewards.append(rewards.sum())
             ep_steps.append(size)
@@ -469,6 +473,7 @@ class PPO:
             log_prob_batch = log_prob_tensor[indices]
             # advantages_batch = advantages_tensor[indices]
             returns_batch = returns_tensor[indices]
+            aux_loss_batch = aux_loss_tensors[indices]
 
             for i in range(0, self.batch_size, self.minibatch_size):
                 # Note: Will cut off final few samples
@@ -484,6 +489,8 @@ class PPO:
                 act = act_batch[i : i + self.minibatch_size].to(self.device)
                 # adv = advantages_batch[i:i + self.minibatch_size].to(self.device)
                 ret = returns_batch[i : i + self.minibatch_size].to(self.device)
+
+                aux_loss = aux_loss_batch[i :  i + self.minibatch_size].to(self.device)
 
                 old_log_prob = log_prob_batch[i : i + self.minibatch_size].to(
                     self.device
@@ -535,6 +542,7 @@ class PPO:
                     policy_loss
                     + self.ent_coef * entropy_loss
                     + self.vf_coef * value_loss
+                    + aux_loss
                 ) / (self.batch_size / self.minibatch_size)
 
                 if not torch.isfinite(loss).all():
