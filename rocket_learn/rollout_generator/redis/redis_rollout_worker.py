@@ -40,7 +40,6 @@ class RedisRolloutWorker:
      :param match: match object
      :param matchmaker: BaseMatchmaker object
      :param evaluation_prob: Odds of running an evaluation match
-     :param sigma_target: Trueskill sigma target
      :param dynamic_gm: Pick game mode dynamically. If True, Match.team_size should be 3
      :param streamer_mode: Should run in streamer mode (less data printed to screen)
      :param send_gamestates: Should gamestate data be sent back (increases data sent) - must send obs or gamestates
@@ -57,8 +56,7 @@ class RedisRolloutWorker:
     """
 
     def __init__(self, redis: Redis, name: str, match: Match, matchmaker: BaseMatchmaker,
-                 evaluation_prob=0.01, sigma_target=1,
-                 dynamic_gm=True, streamer_mode=False, send_gamestates=True,
+                 evaluation_prob=0.01, dynamic_gm=True, streamer_mode=False, send_gamestates=True,
                  send_obs=True, scoreboard=None, pretrained_agents: PretrainedAgents = None,
                  human_agent=None, force_paging=False, auto_minimize=True,
                  local_cache_name=None,
@@ -109,7 +107,6 @@ class RedisRolloutWorker:
         if self.streamer_mode and self.deterministic_streamer:
             self.current_agent.deterministic = True
         self.evaluation_prob = evaluation_prob
-        self.sigma_target = sigma_target
         self.send_gamestates = send_gamestates
         self.send_obs = send_obs
         self.dynamic_gm = dynamic_gm
@@ -378,7 +375,7 @@ class RedisRolloutWorker:
                     
 
                 try:
-                    rollouts, result, body_outs, trajectory_states = rocket_learn.utils.generate_episode.generate_episode(
+                    rollouts, result, trajectory_states = rocket_learn.utils.generate_episode.generate_episode(
                         self.env, agents, versions,
                         evaluate=False,
                         scoreboard=self.scoreboard)
@@ -413,21 +410,23 @@ class RedisRolloutWorker:
                     print()
 
             if not self.streamer_mode:
-                # Get aux head losses here. Only need to do for latest versions
-                latest_version_bo_idxs = [i for i,idx in enumerate(non_pretrained_idxs) if idx in latest_version_idxs]
-                aux_losses = self.current_agent.get_aux_heads_loss([bo for i,bo in body_outs if i in latest_version_bo_idxs], trajectory_states)
-                all_aux_losses = [None] * len(versions)
-                aux_loss_idx = 0
+                # Get aux head labels here. Only need to do for latest versions
+                latest_version_car_ids = [state.players[idx].car_id for idx in latest_version_idxs]
+                latest_version_buffer_idxs = [i for i,idx in enumerate(non_pretrained_idxs) if idx in latest_version_idxs]
+                latest_rewards = [rollouts[i].rewards for i,idx in enumerate(non_pretrained_idxs) if idx in latest_version_buffer_idxs]
+                aux_labels = self.current_agent.get_aux_heads_labels(latest_rewards, trajectory_states, latest_version_car_ids)
+                all_aux_labels = [None] * len(versions)
+                aux_label_idx = 0
                 for idx in range(len(versions)):
                     if idx in latest_version_idxs:
-                        all_aux_losses[idx] = aux_losses[aux_loss_idx]
-                        aux_loss_idx += 1
+                        all_aux_labels[idx] = aux_labels[aux_label_idx]
+                        aux_label_idx += 1
                 
 
 
             if not self.streamer_mode and not self.batch_mode:
 
-                rollout_data = encode_buffers(rollouts, all_aux_losses,
+                rollout_data = encode_buffers(rollouts, all_aux_labels,
                                               return_obs=self.send_obs,
                                               return_states=self.send_gamestates,
                                               return_rewards=True)
@@ -456,7 +455,7 @@ class RedisRolloutWorker:
 
             elif not self.streamer_mode and self.batch_mode:
 
-                rollout_data = encode_buffers(rollouts, all_aux_losses,
+                rollout_data = encode_buffers(rollouts, all_aux_labels,
                                               return_obs=self.send_obs,
                                               return_states=self.send_gamestates,
                                               return_rewards=True)

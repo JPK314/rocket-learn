@@ -83,7 +83,6 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
             all_indices = [None] * len(policies)
             all_actions = [None] * len(policies)
             all_log_probs = [None] * len(policies)
-            all_body_outs = [None] * len(policies)
 
             # if observation isn't a list, make it one so we don't iterate over the observation directly
             if not isinstance(observations, list):
@@ -105,7 +104,6 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
                 action_indices_list = list(action_indices.numpy())
                 log_probs_list = list(log_probs.numpy())
                 for i, idx in enumerate(idxs):
-                    all_body_outs[idx] = body_out[i]
                     all_indices[idx] = action_indices_list[i]
                     all_log_probs[idx] = log_probs_list[i]
                     all_actions[idx] = policy.env_compatible(action_indices[i])
@@ -151,8 +149,6 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
                 rewards) if latest_policy_indices[i] == 1]
             all_log_probs = [r for i, r in enumerate(
                 all_log_probs) if latest_policy_indices[i] == 1]
-            all_body_outs = [b for i, b in enumerate(
-                all_body_outs) if latest_policy_indices[i] == 1]
 
             assert len(old_obs) == len(all_indices), str(
                 len(old_obs)) + " obs, " + str(len(all_indices)) + " ind"
@@ -166,8 +162,6 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
             # Might be different if only one agent?
             if not evaluate:  # Evaluation matches can be long, no reason to keep them in memory
                 trajectory_states.append(info["state"])
-                for body_out_list, body_out in zip(body_outs, all_body_outs):
-                    body_out_list.append(body_out)
                 for exp_buf, obs, act, rew, log_prob in zip(rollouts, old_obs, all_indices, rewards, all_log_probs):
                     exp_buf.add_step(obs, act, rew, done + 2 * truncated, log_prob, info)
 
@@ -210,4 +204,4 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
         env._match._reward_fn = reward  # noqa
         return result
 
-    return rollouts, result, body_outs, trajectory_states
+    return rollouts, result, trajectory_states

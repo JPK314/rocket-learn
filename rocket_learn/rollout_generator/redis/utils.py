@@ -144,7 +144,7 @@ def add_pretrained_ratings(redis: Redis, pretrained_agents: PretrainedAgents, ga
                             gamemode), key, _serialize(tuple(Rating(starting_rating, starting_sigma))))
 
 
-def encode_buffers(buffers: List[ExperienceBuffer], all_aux_losses, return_obs=True, return_states=True, return_rewards=True):
+def encode_buffers(buffers: List[ExperienceBuffer], all_aux_labels, return_obs=True, return_states=True, return_rewards=True):
     res = []
 
     if return_states:
@@ -162,9 +162,11 @@ def encode_buffers(buffers: List[ExperienceBuffer], all_aux_losses, return_obs=T
 
     actions = np.asarray([buffer.actions for buffer in buffers])
     log_probs = np.asarray([buffer.log_probs for buffer in buffers])
+    dones = np.asarray([buffer.dones for buffer in buffers])
     res.append(actions)
     res.append(log_probs)
-    res.append(all_aux_losses)
+    res.append(dones)
+    res.append(np.asarray(all_aux_labels))
 
     return res
 
@@ -192,17 +194,19 @@ def decode_buffers(enc_buffers, versions, has_obs, has_states, has_rewards,
     if has_rewards:
         rewards = enc_buffers[i]
         i += 1
-        dones = np.zeros_like(rewards, dtype=bool)  # TODO: Support for dones?
-        if len(dones) > 0:
-            dones[:, -1] = True
+        # dones = np.zeros_like(rewards, dtype=bool)  # TODO: Support for dones?
+        # if len(dones) > 0:
+        #     dones[:, -1] = True
     else:
         rewards = None
-        dones = None
+        # dones = None
     actions = enc_buffers[i]
     i += 1
     log_probs = enc_buffers[i]
     i += 1
-    all_aux_losses = enc_buffers[i]
+    dones = enc_buffers[i]
+    i += 1
+    all_aux_labels = enc_buffers[i]
     i += 1
 
     if obs is None:
@@ -281,6 +285,6 @@ def decode_buffers(enc_buffers, versions, has_obs, has_states, has_rewards,
                                  rewards=rewards[i],
                                  dones=dones[i],
                                  log_probs=log_probs[i],
-                                 aux_losses=all_aux_losses[i])
+                                 aux_labels=all_aux_labels[i])
             )
         return buffers, game_states

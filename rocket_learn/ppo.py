@@ -14,7 +14,7 @@ import torch as th
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
 
-from rocket_learn.agent.actor_critic_agent import ActorCriticAgent
+from rocket_learn.agent.multi_head_discrete_policy import MultiHeadDiscretePolicy
 from rocket_learn.experience_buffer import ExperienceBuffer
 from rocket_learn.rollout_generator.base_rollout_generator import BaseRolloutGenerator
 from prettytable import PrettyTable
@@ -25,7 +25,7 @@ class PPO:
     Proximal Policy Optimization algorithm (PPO)
 
     :param rollout_generator: Function that will generate the rollouts
-    :param agent: An ActorCriticAgent
+    :param agent: A MultiHeadDiscretePolicy
     :param n_steps: The number of steps to run per update
     :param gamma: Discount factor
     :param batch_size: batch size to break experience data into for training
@@ -48,7 +48,7 @@ class PPO:
     def __init__(
         self,
         rollout_generator: BaseRolloutGenerator,
-        agent: ActorCriticAgent,
+        agent: MultiHeadDiscretePolicy,
         n_steps=4096,
         gamma=0.99,
         batch_size=512,
@@ -273,18 +273,21 @@ class PPO:
     def set_logger(self, logger):
         self.logger = logger
 
-    def evaluate_actions(self, observations, actions):
+    def evaluate_actions_aux_heads(self, observations, actions, aux_labels):
         """
         Calculate Log Probability and Entropy of actions
         """
-        dist = self.agent.actor.get_action_distribution(observations)
+        body_out = self.agent.actor(observations)
+        pred_aux_labels = self.agent.actor.get_aux_head_predictions(body_out)
+        aux_label_losses = self.agent.actor.get_aux_head_losses(aux_labels, pred_aux_labels)
+        dist = self.agent.actor.get_action_distribution(body_out)
         # indices = self.agent.get_action_indices(dists)
 
         log_prob = self.agent.actor.log_prob(dist, actions)
         entropy = self.agent.actor.entropy(dist, actions)
 
         entropy = -torch.mean(entropy)
-        return log_prob, entropy, dist
+        return log_prob, entropy, sum(aux_label_losses), dist
 
     @staticmethod
     @numba.njit
@@ -325,7 +328,7 @@ class PPO:
 
         rewards_tensors = []
 
-        aux_loss_tensors = []
+        aux_labels_tensors = []
 
         ep_rewards = []
         ep_steps = []
@@ -356,8 +359,8 @@ class PPO:
             log_probs = np.stack(buffer.log_probs)
             rewards = np.stack(buffer.rewards)
             dones = np.stack(buffer.dones)
-            aux_losses = np.stack(buffer.aux_losses)
-            
+            aux_labels = np.stack(buffer.aux_labels)
+
 
             size = rewards.shape[0]
 
@@ -378,7 +381,7 @@ class PPO:
             log_prob_tensors.append(th.from_numpy(log_probs))
             returns_tensors.append(th.from_numpy(returns))
             rewards_tensors.append(th.from_numpy(rewards))
-            aux_loss_tensors.append(th.from_numpy(aux_losses))
+            aux_labels_tensors.append(th.from_numpy(aux_labels))
 
             ep_rewards.append(rewards.sum())
             ep_steps.append(size)
@@ -439,6 +442,7 @@ class PPO:
         log_prob_tensor = th.cat(log_prob_tensors).float()
         # advantages_tensor = th.cat(advantage_tensors)
         returns_tensor = th.cat(returns_tensors).float()
+        aux_labels_tensor = th.cat(aux_labels_tensors).float()
 
         tot_loss = 0
         tot_policy_loss = 0
@@ -474,7 +478,7 @@ class PPO:
             log_prob_batch = log_prob_tensor[indices]
             # advantages_batch = advantages_tensor[indices]
             returns_batch = returns_tensor[indices]
-            aux_loss_batch = aux_loss_tensors[indices]
+            aux_labels_batch = aux_labels_tensor[indices]
 
             for i in range(0, self.batch_size, self.minibatch_size):
                 # Note: Will cut off final few samples
@@ -491,7 +495,7 @@ class PPO:
                 # adv = advantages_batch[i:i + self.minibatch_size].to(self.device)
                 ret = returns_batch[i : i + self.minibatch_size].to(self.device)
 
-                aux_loss = aux_loss_batch[i :  i + self.minibatch_size].to(self.device)
+                aux_labels = aux_labels_batch[i :  i + self.minibatch_size].to(self.device)
 
                 old_log_prob = log_prob_batch[i : i + self.minibatch_size].to(
                     self.device
@@ -499,12 +503,12 @@ class PPO:
 
                 # TODO optimization: use forward_actor_critic instead of separate in case shared, also use GPU
                 try:
-                    log_prob, entropy, dist = self.evaluate_actions(
-                        obs, act
+                    log_prob, entropy, aux_loss, dist = self.evaluate_actions_aux_heads(
+                        obs, act, aux_labels
                     )  # Assuming obs and actions as input
                 except RuntimeError as e:
                     print("RuntimeError in evaluate_actions", e)
-                    log_prob, entropy = self.evaluate_actions(
+                    log_prob, entropy, aux_loss = self.evaluate_actions_aux_heads(
                         obs, act
                     )  # Assuming obs and actions as input
                 except ValueError as e:
@@ -520,7 +524,7 @@ class PPO:
                     values_pred = self.agent.critic(obs)
 
                 values_pred = th.squeeze(values_pred)
-                adv = ret - values_pred
+                adv = ret - values_pred.detach()
                 adv = (adv - th.mean(adv)) / (th.std(adv) + 1e-8)
 
                 # clipped surrogate loss

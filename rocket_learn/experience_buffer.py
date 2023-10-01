@@ -1,5 +1,5 @@
 class ExperienceBuffer:
-    def __init__(self, observations=None, actions=None, rewards=None, dones=None, log_probs=None, infos=None, aux_losses=None):
+    def __init__(self, observations=None, actions=None, rewards=None, dones=None, log_probs=None, infos=None, aux_labels=None):
         self.result = 0
         self.observations = []
         self.actions = []
@@ -7,7 +7,7 @@ class ExperienceBuffer:
         self.dones = []
         self.log_probs = []
         self.infos = []
-        self.aux_losses = []
+        self.aux_labels = []
 
         if observations is not None:
             self.observations = observations
@@ -27,8 +27,8 @@ class ExperienceBuffer:
         if infos is not None:
             self.infos = infos
         
-        if aux_losses is not None:
-            self.aux_losses = aux_losses
+        if aux_labels is not None:
+            self.aux_labels = aux_labels
 
     def size(self):
         return len(self.rewards)

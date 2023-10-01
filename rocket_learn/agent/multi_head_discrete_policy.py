@@ -7,17 +7,16 @@ from torch.distributions import Categorical
 import torch.nn.functional as F
 
 from rocket_learn.agent.policy import Policy
+from rocket_learn.agent.aux_head import AuxHead
 
 
 class MultiHeadDiscretePolicy(Policy):
-    def __init__(self, body: nn.Module, heads: Tuple[nn.Module], head_prediction_actual_fns: Tuple[function], head_prediction_grade_fns: Tuple[function],
-        shape: Tuple[int, ...] = (3,) * 5 + (2,) * 3, deterministic=False):
+    def __init__(self, body: nn.Module, head: nn.Module, aux_heads: Tuple[AuxHead], shape: Tuple[int, ...] = (3,) * 5 + (2,) * 3, deterministic=False):
 
         super().__init__(deterministic)
         self.body = body
-        self.heads = heads
-        self.head_prediction_actual_fns = head_prediction_actual_fns
-        self.head_prediction_grade_fns = head_prediction_grade_fns
+        self.head = head
+        self.aux_heads = aux_heads
         self.shape = shape
 
     def forward(self, obs):
@@ -27,13 +26,22 @@ class MultiHeadDiscretePolicy(Policy):
             obs = tuple(o if isinstance(o, th.Tensor) else th.from_numpy(o).float() for o in obs)
         return self.body(obs)
 
-    def get_aux_heads_loss(self, body_outs, game_states):
-        prediction_actuals = [fn(game_states) for fn in self.head_prediction_actual_fns]
-        predictions = [head(th.as_tensor(body_outs)) for head in self.heads[1:]]
-        return sum([fn(predictions[idx], prediction_actuals[idx]) for idx,fn in enumerate(self.head_prediction_grade_fns)])
+    def get_aux_heads_labels(self, rewards, game_states, car_ids):
+        return tuple(aux_head.get_label(rewards, game_states, car_ids) for aux_head in self.aux_heads)
+
+    def get_aux_head_predictions(self, body_out):
+        return tuple(aux_head.get_prediction(body_out) for aux_head in self.aux_heads)
+    
+    def get_aux_head_losses(self, labels, predictions):
+        """
+        :param labels: tuple of tensors, where each tensor corresponds to a list of labels formed from the game states that led to observations, and each element in the tuple is an aux head
+        :param predictions: tuple of tuples of prediction tensors - the inner tuple is in parallel with the corresponding label tensor, and each element in the outer tuple corresponds to an aux head
+        """
+
+        return tuple(th.mean(aux_head.grade_prediction(labels[i], predictions[i])) for i,aux_head in enumerate(self.aux_heads))
 
     def get_action_distribution(self, body_out):
-        logits = self.heads[0](body_out)
+        logits = self.head(body_out)
 
         if isinstance(logits, th.Tensor):
             logits = (logits,)
