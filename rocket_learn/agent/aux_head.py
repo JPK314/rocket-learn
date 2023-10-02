@@ -16,6 +16,15 @@ class AuxHead(nn.Module):
         logits = self.net(obs)
         return logits
 
+    def get_prediction(self, body_out):
+        """
+        Defines how the output of the shared body turns into a prediction.
+        :param body_out: Tensor where 0th dimension is batching dimension, and other dimensions form the tensor for a single body output.
+        
+        :return: Tuple of torch Tensors.
+        """
+        return self(body_out)
+
     @abstractmethod
     def get_label(self, rewards, game_states, car_ids):
         """
@@ -29,20 +38,11 @@ class AuxHead(nn.Module):
         raise NotImplementedError
 
     @abstractmethod
-    def get_prediction(self, body_out):
-        """
-        Defines how the output of the shared body turns into a prediction.
-        :param body_out: Tuple of torch Tensors, where each Tensor is the output of the shared body for an agent.
-        
-        :return: Tuple of torch Tensors.
-        """
-        return self(body_out)
-
     def grade_prediction(self, labels, predictions):
         """
         Defines how a label and a prediction turn into a loss term.
         :param labels: torch Tensor of labels (th.from_numpy(numpy_array)).
-        :param predictions: Tuple of Torch tensors, where each Tensor corresponds to an element of the labels Tensor.
+        :param predictions: Tensor where 0th dimension is parallel with labels, and the other dimensions form the tensor for the head output.
 
         :return: torch Tensor of grades
         """

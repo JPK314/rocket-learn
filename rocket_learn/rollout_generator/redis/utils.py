@@ -166,7 +166,7 @@ def encode_buffers(buffers: List[ExperienceBuffer], all_aux_labels, return_obs=T
     res.append(actions)
     res.append(log_probs)
     res.append(dones)
-    res.append(np.asarray(all_aux_labels))
+    res.append(all_aux_labels)
 
     return res
 

@@ -14,7 +14,7 @@ import torch as th
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
 
-from rocket_learn.agent.multi_head_discrete_policy import MultiHeadDiscretePolicy
+from rocket_learn.agent.actor_critic_agent import ActorCriticAgent
 from rocket_learn.experience_buffer import ExperienceBuffer
 from rocket_learn.rollout_generator.base_rollout_generator import BaseRolloutGenerator
 from prettytable import PrettyTable
@@ -25,7 +25,7 @@ class PPO:
     Proximal Policy Optimization algorithm (PPO)
 
     :param rollout_generator: Function that will generate the rollouts
-    :param agent: A MultiHeadDiscretePolicy
+    :param agent: An ActorCriticAgent with actor as MultiHeadDiscretePolicy
     :param n_steps: The number of steps to run per update
     :param gamma: Discount factor
     :param batch_size: batch size to break experience data into for training
@@ -48,7 +48,7 @@ class PPO:
     def __init__(
         self,
         rollout_generator: BaseRolloutGenerator,
-        agent: MultiHeadDiscretePolicy,
+        agent: ActorCriticAgent,
         n_steps=4096,
         gamma=0.99,
         batch_size=512,
@@ -76,6 +76,8 @@ class PPO:
         # TODO let users choose their own agent
         # TODO move agent to rollout generator
         self.agent = agent.to(device)
+        device_aux_heads = tuple(aux_head.to(device) for aux_head in self.agent.actor.aux_heads)
+        self.agent.actor.aux_heads = device_aux_heads
         self.device = device
         self.zero_grads_with_none = zero_grads_with_none
         self.frozen_iterations = 0
@@ -273,13 +275,13 @@ class PPO:
     def set_logger(self, logger):
         self.logger = logger
 
-    def evaluate_actions_aux_heads(self, observations, actions, aux_labels):
+    def evaluate_actions_aux_heads(self, observations, actions, aux_heads_labels):
         """
         Calculate Log Probability and Entropy of actions
         """
         body_out = self.agent.actor(observations)
         pred_aux_labels = self.agent.actor.get_aux_head_predictions(body_out)
-        aux_label_losses = self.agent.actor.get_aux_head_losses(aux_labels, pred_aux_labels)
+        aux_label_losses = self.agent.actor.get_aux_head_losses(aux_heads_labels, pred_aux_labels)
         dist = self.agent.actor.get_action_distribution(body_out)
         # indices = self.agent.get_action_indices(dists)
 
@@ -328,7 +330,7 @@ class PPO:
 
         rewards_tensors = []
 
-        aux_labels_tensors = []
+        aux_heads_labels_tensors = tuple([] for _ in self.agent.actor.aux_heads)
 
         ep_rewards = []
         ep_steps = []
@@ -359,7 +361,7 @@ class PPO:
             log_probs = np.stack(buffer.log_probs)
             rewards = np.stack(buffer.rewards)
             dones = np.stack(buffer.dones)
-            aux_labels = np.stack(buffer.aux_labels)
+            aux_heads_labels = tuple(np.stack(aux_head_labels) for aux_head_labels in buffer.aux_labels)
 
 
             size = rewards.shape[0]
@@ -381,7 +383,8 @@ class PPO:
             log_prob_tensors.append(th.from_numpy(log_probs))
             returns_tensors.append(th.from_numpy(returns))
             rewards_tensors.append(th.from_numpy(rewards))
-            aux_labels_tensors.append(th.from_numpy(aux_labels))
+            for aux_head_labels, aux_head_labels_tensors in zip(aux_heads_labels, aux_heads_labels_tensors):
+                aux_head_labels_tensors.append(th.from_numpy(aux_head_labels))
 
             ep_rewards.append(rewards.sum())
             ep_steps.append(size)
@@ -442,7 +445,7 @@ class PPO:
         log_prob_tensor = th.cat(log_prob_tensors).float()
         # advantages_tensor = th.cat(advantage_tensors)
         returns_tensor = th.cat(returns_tensors).float()
-        aux_labels_tensor = th.cat(aux_labels_tensors).float()
+        aux_heads_labels_tensor = tuple(th.cat(aux_head_labels_tensors).float() for aux_head_labels_tensors in aux_heads_labels_tensors)
 
         tot_loss = 0
         tot_policy_loss = 0
@@ -478,7 +481,7 @@ class PPO:
             log_prob_batch = log_prob_tensor[indices]
             # advantages_batch = advantages_tensor[indices]
             returns_batch = returns_tensor[indices]
-            aux_labels_batch = aux_labels_tensor[indices]
+            aux_heads_labels_batch = tuple(aux_head_labels_tensor[indices] for aux_head_labels_tensor in aux_heads_labels_tensor)
 
             for i in range(0, self.batch_size, self.minibatch_size):
                 # Note: Will cut off final few samples
@@ -495,7 +498,7 @@ class PPO:
                 # adv = advantages_batch[i:i + self.minibatch_size].to(self.device)
                 ret = returns_batch[i : i + self.minibatch_size].to(self.device)
 
-                aux_labels = aux_labels_batch[i :  i + self.minibatch_size].to(self.device)
+                aux_heads_labels = tuple(aux_head_labels_batch[i :  i + self.minibatch_size].to(self.device) for aux_head_labels_batch in aux_heads_labels_batch)
 
                 old_log_prob = log_prob_batch[i : i + self.minibatch_size].to(
                     self.device
@@ -504,12 +507,12 @@ class PPO:
                 # TODO optimization: use forward_actor_critic instead of separate in case shared, also use GPU
                 try:
                     log_prob, entropy, aux_loss, dist = self.evaluate_actions_aux_heads(
-                        obs, act, aux_labels
+                        obs, act, aux_heads_labels
                     )  # Assuming obs and actions as input
                 except RuntimeError as e:
                     print("RuntimeError in evaluate_actions", e)
                     log_prob, entropy, aux_loss = self.evaluate_actions_aux_heads(
-                        obs, act
+                        obs, act, aux_heads_labels
                     )  # Assuming obs and actions as input
                 except ValueError as e:
                     print("ValueError in evaluate_actions", e)
@@ -635,6 +638,8 @@ class PPO:
 
         checkpoint = torch.load(load_location)
         self.agent.actor.load_state_dict(checkpoint["actor_state_dict"])
+        for aux_head, aux_head_state_dict in zip(self.agent.actor.aux_heads, checkpoint["aux_head_state_dicts"]):
+            aux_head.load_state_dict(aux_head_state_dict)
         self.agent.critic.load_state_dict(checkpoint["critic_state_dict"])
         self.agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
@@ -661,6 +666,7 @@ class PPO:
                 "epoch": current_step,
                 "total_steps": self.total_steps,
                 "actor_state_dict": self.agent.actor.state_dict(),
+                "aux_head_state_dicts": tuple(aux_head.state_dict() for aux_head in self.agent.actor.aux_heads),
                 "critic_state_dict": self.agent.critic.state_dict(),
                 "optimizer_state_dict": self.agent.optimizer.state_dict(),
                 # TODO save/load reward normalization mean, std, count

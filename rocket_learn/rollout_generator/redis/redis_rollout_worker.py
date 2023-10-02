@@ -58,7 +58,7 @@ class RedisRolloutWorker:
     def __init__(self, redis: Redis, name: str, match: Match, matchmaker: BaseMatchmaker,
                  evaluation_prob=0.01, dynamic_gm=True, streamer_mode=False, send_gamestates=True,
                  send_obs=True, scoreboard=None, pretrained_agents: PretrainedAgents = None,
-                 human_agent=None, force_paging=False, auto_minimize=True,
+                 human_agent=None, force_paging=False, auto_minimize=True, tick_skip=0,
                  local_cache_name=None,
                  force_old_deterministic=False,
                  deterministic_streamer=False,
@@ -168,7 +168,7 @@ class RedisRolloutWorker:
         if simulator:
             import rlgym_sim
             self.env = rlgym_sim.gym.Gym(match=self.match, copy_gamestate_every_step=True,
-                                         dodge_deadzone=dodge_deadzone, tick_skip=8, gravity=1, boost_consumption=1)
+                                         dodge_deadzone=dodge_deadzone, tick_skip=tick_skip, gravity=1, boost_consumption=1)
         else:
             self.env = Gym(match=self.match, pipe_id=os.getpid(), launch_preference=LaunchPreference.EPIC,
                            use_injector=True, force_paging=force_paging, raise_on_crash=True, auto_minimize=auto_minimize,
@@ -317,7 +317,7 @@ class RedisRolloutWorker:
                 versions = [v if v != -1 else latest_version for v in versions]
                 ratings = ["na"] * len(versions)
             else:
-                versions, ratings, evaluate = self.matchmaker.generate_matchup(self.redis, blue + orange,evaluate)
+                versions, ratings, evaluate, blue, orange = self.matchmaker.generate_matchup(self.redis, blue + orange, evaluate)
                 agents = []
                 latest_version_idxs = []
                 non_pretrained_idxs = []
@@ -337,7 +337,7 @@ class RedisRolloutWorker:
                             selected_agent = self.pretrained_agents_keymap[version]
                         else:
                             selected_agent = self._get_past_model(short_name)
-                            if self.force_old_deterministic and n_new != 0:
+                            if self.force_old_deterministic and not evaluate:
                                 versions[i] = versions[i].replace(
                                     'stochastic', 'deterministic')
                                 version = version.replace(
@@ -419,7 +419,7 @@ class RedisRolloutWorker:
                 aux_label_idx = 0
                 for idx in range(len(versions)):
                     if idx in latest_version_idxs:
-                        all_aux_labels[idx] = aux_labels[aux_label_idx]
+                        all_aux_labels[idx] = tuple(aux_head_labels[aux_label_idx] for aux_head_labels in aux_labels)
                         aux_label_idx += 1
                 
 
