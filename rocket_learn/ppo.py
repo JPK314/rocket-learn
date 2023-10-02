@@ -40,6 +40,7 @@ class PPO:
     :param device: torch device
     :param zero_grads_with_none: 0 gradient with None instead of 0
     :param tick_skip_starts: a list of three tuples, from iteration 0, of (tick_skip, iteration_started, step_size)
+    :param aux_heads_log_names: a list of strings to use for names for aux head related graphs
 
     Look here for info on zero_grads_with_none
     https://pytorch.org/docs/master/generated/torch.optim.Optimizer.zero_grad.html#torch.optim.Optimizer.zero_grad
@@ -67,6 +68,7 @@ class PPO:
         action_selection_dict=None,
         num_actions=0,
         tick_skip_starts=None,
+        aux_heads_log_names=None
     ):
         self.tick_skip_starts = tick_skip_starts
         self.num_actions = num_actions
@@ -78,6 +80,13 @@ class PPO:
         self.agent = agent.to(device)
         device_aux_heads = tuple(aux_head.to(device) for aux_head in self.agent.actor.aux_heads)
         self.agent.actor.aux_heads = device_aux_heads
+        if not aux_heads_log_names:
+            aux_heads_log_names = [f"ppo/aux_head_{idx+1}" for idx, _ in enumerate(self.agent.actor.aux_heads)]
+        idx = len(aux_heads_log_names)
+        while idx < len(self.agent.actor.aux_heads):
+            aux_heads_log_names.append(f"ppo/aux_head_{idx}")
+            idx += 1
+        self.aux_heads_log_names = aux_heads_log_names
         self.device = device
         self.zero_grads_with_none = zero_grads_with_none
         self.frozen_iterations = 0
@@ -281,7 +290,7 @@ class PPO:
         """
         body_out = self.agent.actor(observations)
         pred_aux_labels = self.agent.actor.get_aux_head_predictions(body_out)
-        aux_label_losses = self.agent.actor.get_aux_head_losses(aux_heads_labels, pred_aux_labels)
+        aux_heads_loss = self.agent.actor.get_aux_head_losses(aux_heads_labels, pred_aux_labels)
         dist = self.agent.actor.get_action_distribution(body_out)
         # indices = self.agent.get_action_indices(dists)
 
@@ -289,7 +298,7 @@ class PPO:
         entropy = self.agent.actor.entropy(dist, actions)
 
         entropy = -torch.mean(entropy)
-        return log_prob, entropy, sum(aux_label_losses), dist
+        return log_prob, entropy, aux_heads_loss, dist
 
     @staticmethod
     @numba.njit
@@ -451,6 +460,7 @@ class PPO:
         tot_policy_loss = 0
         tot_entropy_loss = 0
         tot_value_loss = 0
+        tot_aux_heads_loss = [0 for _ in self.agent.actor.aux_heads]
         total_kl_div = 0
         tot_clipped = 0
 
@@ -506,12 +516,12 @@ class PPO:
 
                 # TODO optimization: use forward_actor_critic instead of separate in case shared, also use GPU
                 try:
-                    log_prob, entropy, aux_loss, dist = self.evaluate_actions_aux_heads(
+                    log_prob, entropy, aux_heads_loss, dist = self.evaluate_actions_aux_heads(
                         obs, act, aux_heads_labels
                     )  # Assuming obs and actions as input
                 except RuntimeError as e:
                     print("RuntimeError in evaluate_actions", e)
-                    log_prob, entropy, aux_loss = self.evaluate_actions_aux_heads(
+                    log_prob, entropy, aux_heads_loss = self.evaluate_actions_aux_heads(
                         obs, act, aux_heads_labels
                     )  # Assuming obs and actions as input
                 except ValueError as e:
@@ -550,7 +560,7 @@ class PPO:
                     policy_loss
                     + self.ent_coef * entropy_loss
                     + self.vf_coef * value_loss
-                    + aux_loss
+                    + sum(aux_heads_loss)
                 ) / (self.batch_size / self.minibatch_size)
 
                 if not torch.isfinite(loss).all():
@@ -558,6 +568,7 @@ class PPO:
                     print("\tPolicy loss:", policy_loss)
                     print("\tEntropy loss:", entropy_loss)
                     print("\tValue loss:", value_loss)
+                    print("\tAux loss:", aux_heads_loss)
                     print("\tTotal loss:", loss)
                     print("\tRatio:", ratio)
                     print("\tAdv:", adv)
@@ -594,6 +605,9 @@ class PPO:
                 tot_policy_loss += policy_loss.item()
                 tot_entropy_loss += entropy_loss.item()
                 tot_value_loss += value_loss.item()
+                for idx, aux_head_loss in enumerate(aux_heads_loss):
+                    tot_aux_heads_loss[idx] += aux_head_loss.item()
+
                 tot_clipped += th.mean(
                     (th.abs(ratio - 1) > self.clip_range).float()
                 ).item()
@@ -614,20 +628,20 @@ class PPO:
         postcompute = torch.cat(
             [param.view(-1) for param in self.agent.actor.parameters()]
         )
-        self.logger.log(
-            {
-                "ppo/loss": tot_loss / n,
-                "ppo/policy_loss": tot_policy_loss / n,
-                "ppo/entropy_loss": tot_entropy_loss / n,
-                "ppo/value_loss": tot_value_loss / n,
-                "ppo/mean_kl": total_kl_div / n,
-                "ppo/clip_fraction": tot_clipped / n,
-                "ppo/epoch_time": (t1 - t0) / (1e6 * self.epochs),
-                "ppo/update_magnitude": th.dist(precompute, postcompute, p=2),
-            },
-            step=iteration,
-            commit=False,
-        )  # Is committed after when calculating fps
+        logdict = {
+            "ppo/loss": tot_loss / n,
+            "ppo/policy_loss": tot_policy_loss / n,
+            "ppo/entropy_loss": tot_entropy_loss / n,
+            "ppo/value_loss": tot_value_loss / n,
+            "ppo/mean_kl": total_kl_div / n,
+            "ppo/clip_fraction": tot_clipped / n,
+            "ppo/epoch_time": (t1 - t0) / (1e6 * self.epochs),
+            "ppo/update_magnitude": th.dist(precompute, postcompute, p=2),
+        }
+        for idx, aux_head_log_name in enumerate(self.aux_heads_log_names):
+            logdict[aux_head_log_name] = tot_aux_heads_loss[idx]
+
+        self.logger.log(logdict, step=iteration, commit=False)  # Is committed after when calculating fps
 
     def load(self, load_location, continue_iterations=True):
         """
