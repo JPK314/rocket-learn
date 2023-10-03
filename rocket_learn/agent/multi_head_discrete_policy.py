@@ -42,6 +42,21 @@ class MultiHeadDiscretePolicy(Policy):
 
     def get_action_distribution(self, body_out):
         logits = self.head(body_out)
+
+        if isinstance(logits, th.Tensor):
+            logits = (logits,)
+
+        max_shape = max(self.shape)
+        logits = th.stack(
+            [
+                l
+                if l.shape[-1] == max_shape
+                else F.pad(l, pad=(0, max_shape - l.shape[-1]), value=float("-inf"))
+                for l in logits
+            ],
+            dim=1
+        )
+        
         return Categorical(logits=logits)
 
     def sample_action(
