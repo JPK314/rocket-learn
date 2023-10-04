@@ -6,10 +6,9 @@ import torch as th
 from torch import nn
 
 class AuxHead(nn.Module):
-    def __init__(self, net: nn.Module, shape: Tuple[int, ...] = (3,) * 5 + (2,) * 3, deterministic=False):
+    def __init__(self, net: nn.Module, deterministic=False):
         super().__init__()
         self.net = net
-        self.shape = shape
         self.deterministic = deterministic
 
     def forward(self, obs):
