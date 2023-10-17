@@ -414,7 +414,8 @@ class RedisRolloutWorker:
                 latest_version_car_ids = [state.players[idx].car_id for idx in latest_version_idxs]
                 latest_version_buffer_idxs = [i for i,idx in enumerate(non_pretrained_idxs) if idx in latest_version_idxs]
                 latest_rewards = [rollouts[i].rewards for i,idx in enumerate(non_pretrained_idxs) if idx in latest_version_buffer_idxs]
-                aux_labels = self.current_agent.get_aux_heads_labels(latest_rewards, trajectory_states, latest_version_car_ids)
+                latest_observations = [rollouts[i].observations for i,idx in enumerate(non_pretrained_idxs) if idx in latest_version_buffer_idxs]
+                aux_labels = self.current_agent.get_aux_heads_labels(latest_rewards, trajectory_states, latest_version_car_ids, latest_observations)
                 all_aux_labels = [None] * len(versions)
                 aux_label_idx = 0
                 for idx in range(len(versions)):

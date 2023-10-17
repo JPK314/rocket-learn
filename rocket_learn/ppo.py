@@ -460,7 +460,7 @@ class PPO:
         tot_policy_loss = 0
         tot_entropy_loss = 0
         tot_value_loss = 0
-        tot_aux_heads_loss = [0 for _ in self.agent.actor.aux_heads]
+        tot_aux_heads_loss = [0 for _ in self.aux_heads_log_names]
         total_kl_div = 0
         tot_clipped = 0
 

@@ -26,8 +26,8 @@ class MultiHeadDiscretePolicy(Policy):
             obs = tuple(o if isinstance(o, th.Tensor) else th.from_numpy(o).float() for o in obs)
         return self.body(obs)
 
-    def get_aux_heads_labels(self, rewards, game_states, car_ids):
-        return tuple(aux_head.get_label(rewards, game_states, car_ids) for aux_head in self.aux_heads)
+    def get_aux_heads_labels(self, rewards, game_states, car_ids, observations):
+        return tuple(aux_head.get_label(rewards, game_states, car_ids, observations) for aux_head in self.aux_heads)
 
     def get_aux_head_predictions(self, body_out):
         return tuple(aux_head.get_prediction(body_out) for aux_head in self.aux_heads)
@@ -37,8 +37,14 @@ class MultiHeadDiscretePolicy(Policy):
         :param labels: tuple of tensors, where each tensor corresponds to a list of labels formed from the game states that led to observations, and each element in the tuple is an aux head
         :param predictions: tuple of tuples of prediction tensors - the inner tuple is in parallel with the corresponding label tensor, and each element in the outer tuple corresponds to an aux head
         """
-
-        return tuple(th.mean(aux_head.grade_prediction(labels[i], predictions[i])) for i,aux_head in enumerate(self.aux_heads))
+        losses = []
+        for i, aux_head in enumerate(self.aux_heads):
+            aux_head_grades = aux_head.grade_prediction(labels[i], predictions[i])
+            if isinstance(aux_head_grades, tuple):
+                losses += [th.mean(grade) for grade in aux_head_grades]
+            else:
+                losses.append(th.mean(aux_head_grades))
+        return tuple(losses)
 
     def get_action_distribution(self, body_out):
         logits = self.head(body_out)
@@ -56,7 +62,7 @@ class MultiHeadDiscretePolicy(Policy):
             ],
             dim=1
         )
-        
+
         return Categorical(logits=logits)
 
     def sample_action(
