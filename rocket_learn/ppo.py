@@ -2,22 +2,22 @@ import cProfile
 import io
 import os
 import pstats
-import time
 import sys
-from typing import Iterator
+import time
 from collections import defaultdict
+from typing import Iterator
 
 import numba
 import numpy as np
 import torch
 import torch as th
+from prettytable import PrettyTable
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
 
 from rocket_learn.agent.actor_critic_agent import ActorCriticAgent
 from rocket_learn.experience_buffer import ExperienceBuffer
 from rocket_learn.rollout_generator.base_rollout_generator import BaseRolloutGenerator
-from prettytable import PrettyTable
 
 
 class PPO:
@@ -68,7 +68,9 @@ class PPO:
         action_selection_dict=None,
         num_actions=0,
         tick_skip_starts=None,
-        aux_heads_log_names=None
+        aux_heads_log_names=None,
+        aux_weight_update_freq=5,
+        aux_weight_learning_rate=1,
     ):
         self.tick_skip_starts = tick_skip_starts
         self.num_actions = num_actions
@@ -78,12 +80,25 @@ class PPO:
         # TODO let users choose their own agent
         # TODO move agent to rollout generator
         self.agent = agent.to(device)
-        device_aux_heads = tuple(aux_head.to(device) for aux_head in self.agent.actor.aux_heads)
+        device_aux_heads = tuple(
+            aux_head.to(device) for aux_head in self.agent.actor.aux_heads
+        )
+        total_aux_losses = sum(
+            len(aux_head.get_weight()) for aux_head in self.agent.actor.aux_heads
+        )
+        self.aux_weight_update_freq = aux_weight_update_freq
+        self.aux_weight_timer = 0
+        self.hist_main_loss_grads = []
+        self.hist_aux_loss_grads = [[] for _ in range(total_aux_losses)]
+        self.aux_weight_learning_rate = aux_weight_learning_rate
         self.agent.actor.aux_heads = device_aux_heads
         if not aux_heads_log_names:
-            aux_heads_log_names = [f"ppo/aux_head_{idx+1}" for idx, _ in enumerate(self.agent.actor.aux_heads)]
+            aux_heads_log_names = [
+                f"ppo/aux_head_{idx+1}"
+                for idx, _ in enumerate(self.agent.actor.aux_heads)
+            ]
         idx = len(aux_heads_log_names)
-        while idx < len(self.agent.actor.aux_heads):
+        while idx < total_aux_losses:
             aux_heads_log_names.append(f"ppo/aux_head_{idx}")
             idx += 1
         self.aux_heads_log_names = aux_heads_log_names
@@ -290,7 +305,9 @@ class PPO:
         """
         body_out = self.agent.actor(observations)
         pred_aux_labels = self.agent.actor.get_aux_head_predictions(body_out)
-        aux_heads_loss = self.agent.actor.get_aux_head_losses(aux_heads_labels, pred_aux_labels)
+        aux_heads_loss = self.agent.actor.get_aux_head_losses(
+            aux_heads_labels, pred_aux_labels
+        )
         dist = self.agent.actor.get_action_distribution(body_out)
         # indices = self.agent.get_action_indices(dists)
 
@@ -325,6 +342,17 @@ class PPO:
             advantages[step] = last_gae_lam
             # v_targets[step] = v_target
         return advantages  # , v_targets
+
+    def _get_flat_gradient(self, model):
+        flat = th.tensor([], dtype=th.float, device=self.device)
+        for p in model.parameters():
+            if p.grad is not None:
+                grad = p.grad.data.ravel()
+            else:
+                grad = th.zeros(p.shape).ravel()
+
+            flat = th.cat((flat, grad))
+        return flat
 
     def calculate(self, buffers: Iterator[ExperienceBuffer], iteration):
         """
@@ -370,8 +398,9 @@ class PPO:
             log_probs = np.stack(buffer.log_probs)
             rewards = np.stack(buffer.rewards)
             dones = np.stack(buffer.dones)
-            aux_heads_labels = tuple(np.stack(aux_head_labels) for aux_head_labels in buffer.aux_labels)
-
+            aux_heads_labels = tuple(
+                np.stack(aux_head_labels) for aux_head_labels in buffer.aux_labels
+            )
 
             size = rewards.shape[0]
 
@@ -392,7 +421,9 @@ class PPO:
             log_prob_tensors.append(th.from_numpy(log_probs))
             returns_tensors.append(th.from_numpy(returns))
             rewards_tensors.append(th.from_numpy(rewards))
-            for aux_head_labels, aux_head_labels_tensors in zip(aux_heads_labels, aux_heads_labels_tensors):
+            for aux_head_labels, aux_head_labels_tensors in zip(
+                aux_heads_labels, aux_heads_labels_tensors
+            ):
                 aux_head_labels_tensors.append(th.from_numpy(aux_head_labels))
 
             ep_rewards.append(rewards.sum())
@@ -454,7 +485,10 @@ class PPO:
         log_prob_tensor = th.cat(log_prob_tensors).float()
         # advantages_tensor = th.cat(advantage_tensors)
         returns_tensor = th.cat(returns_tensors).float()
-        aux_heads_labels_tensor = tuple(th.cat(aux_head_labels_tensors).float() for aux_head_labels_tensors in aux_heads_labels_tensors)
+        aux_heads_labels_tensor = tuple(
+            th.cat(aux_head_labels_tensors).float()
+            for aux_head_labels_tensors in aux_heads_labels_tensors
+        )
 
         tot_loss = 0
         tot_policy_loss = 0
@@ -477,6 +511,7 @@ class PPO:
         precompute = torch.cat(
             [param.view(-1) for param in self.agent.actor.parameters()]
         )
+        aux_weights = self.agent.actor.get_aux_head_weights()
         t0 = time.perf_counter_ns()
         self.agent.optimizer.zero_grad(set_to_none=self.zero_grads_with_none)
         for e in range(self.epochs):
@@ -491,8 +526,20 @@ class PPO:
             log_prob_batch = log_prob_tensor[indices]
             # advantages_batch = advantages_tensor[indices]
             returns_batch = returns_tensor[indices]
-            aux_heads_labels_batch = tuple(aux_head_labels_tensor[indices] for aux_head_labels_tensor in aux_heads_labels_tensor)
-
+            aux_heads_labels_batch = tuple(
+                aux_head_labels_tensor[indices]
+                for aux_head_labels_tensor in aux_heads_labels_tensor
+            )
+            main_loss = th.tensor(0, device=self.device, dtype=th.float)
+            aux_losses = [
+                th.tensor(0, device=self.device, dtype=th.float)
+                for _ in range(
+                    sum(
+                        len(aux_head.get_weight())
+                        for aux_head in self.agent.actor.aux_heads
+                    )
+                )
+            ]
             for i in range(0, self.batch_size, self.minibatch_size):
                 # Note: Will cut off final few samples
 
@@ -508,7 +555,10 @@ class PPO:
                 # adv = advantages_batch[i:i + self.minibatch_size].to(self.device)
                 ret = returns_batch[i : i + self.minibatch_size].to(self.device)
 
-                aux_heads_labels = tuple(aux_head_labels_batch[i :  i + self.minibatch_size].to(self.device) for aux_head_labels_batch in aux_heads_labels_batch)
+                aux_heads_labels = tuple(
+                    aux_head_labels_batch[i : i + self.minibatch_size].to(self.device)
+                    for aux_head_labels_batch in aux_heads_labels_batch
+                )
 
                 old_log_prob = log_prob_batch[i : i + self.minibatch_size].to(
                     self.device
@@ -516,12 +566,22 @@ class PPO:
 
                 # TODO optimization: use forward_actor_critic instead of separate in case shared, also use GPU
                 try:
-                    log_prob, entropy, aux_heads_loss, dist = self.evaluate_actions_aux_heads(
+                    (
+                        log_prob,
+                        entropy,
+                        aux_heads_loss,
+                        dist,
+                    ) = self.evaluate_actions_aux_heads(
                         obs, act, aux_heads_labels
                     )  # Assuming obs and actions as input
                 except RuntimeError as e:
                     print("RuntimeError in evaluate_actions", e)
-                    log_prob, entropy, aux_heads_loss = self.evaluate_actions_aux_heads(
+                    (
+                        log_prob,
+                        entropy,
+                        aux_heads_loss,
+                        dist,
+                    ) = self.evaluate_actions_aux_heads(
                         obs, act, aux_heads_labels
                     )  # Assuming obs and actions as input
                 except ValueError as e:
@@ -555,6 +615,13 @@ class PPO:
                     entropy_loss = -th.mean(-log_prob)
                 else:
                     entropy_loss = entropy
+                main_loss += (
+                    policy_loss
+                    + self.ent_coef * entropy_loss
+                    + self.vf_coef * value_loss
+                )
+                for idx, aux_head_loss in enumerate(aux_heads_loss):
+                    aux_losses[idx] += aux_head_loss
 
                 loss = (
                     policy_loss
@@ -597,8 +664,6 @@ class PPO:
                         print("\tObs has inf:", not obs.isfinite().all())
                     continue
 
-                loss.backward()
-
                 # Unbiased low variance KL div estimator from http://joschu.net/blog/kl-approx.html
                 total_kl_div += th.mean((ratio - 1) - (log_prob - old_log_prob)).item()
                 tot_loss += loss.item()
@@ -614,6 +679,52 @@ class PPO:
                 n += 1
                 # pb.update(self.minibatch_size)
 
+            # Get loss gradients for aux weight update
+            th.log(main_loss).backward(retain_graph=True)
+            main_loss_grad = self._get_flat_gradient(self.agent.actor)
+            self.hist_main_loss_grads.append(main_loss_grad)
+            total_grad = main_loss_grad
+            for idx, aux_loss in enumerate(aux_losses):
+                th.log(aux_loss).backward(retain_graph=True)
+                new_grad = self._get_flat_gradient(self.agent.actor)
+                self.hist_aux_loss_grads[idx].append(new_grad - total_grad)
+                total_grad = new_grad
+            self.aux_weight_timer += 1
+            update_vec = th.tensor(
+                [0] * len(self.hist_aux_loss_grads), device=self.device, dtype=th.float
+            )
+            if self.aux_weight_timer == self.aux_weight_update_freq:
+                self.aux_weight_timer = 0
+                for update_vec_idx, hist_aux_loss_grad in enumerate(
+                    self.hist_aux_loss_grads
+                ):
+                    for hist_idx, aux_loss_grad in enumerate(hist_aux_loss_grad):
+                        update_vec[update_vec_idx] += th.dot(
+                            aux_loss_grad, self.hist_main_loss_grads[hist_idx]
+                        )
+                self.agent.actor.update_aux_head_weights(
+                    self.aux_weight_learning_rate * update_vec
+                )
+                self.hist_aux_loss_grads = [
+                    [] for _ in range(len(self.hist_aux_loss_grads))
+                ]
+                self.hist_main_loss_grads = []
+                self.hist_aux_loss_grads = [
+                    []
+                    for _ in range(
+                        sum(
+                            len(aux_head.get_weight())
+                            for aux_head in self.agent.actor.aux_heads
+                        )
+                    )
+                ]
+
+            # Set up computational graph for optimizer
+            self.agent.optimizer.zero_grad(set_to_none=self.zero_grads_with_none)
+            main_loss.backward(retain_graph=True)
+            aux_weights = self.agent.actor.get_aux_head_weights()
+            for aux_weight, aux_loss in zip(aux_weights, aux_losses):
+                (aux_weight * aux_loss).backward(retain_graph=True)
             # Clip grad norm
             if self.max_grad_norm is not None:
                 clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
@@ -640,8 +751,12 @@ class PPO:
         }
         for idx, aux_head_log_name in enumerate(self.aux_heads_log_names):
             logdict[aux_head_log_name] = tot_aux_heads_loss[idx]
+            logdict[f"{aux_head_log_name}_weight"] = aux_weights[idx]
 
-        self.logger.log(logdict, step=iteration, commit=False)  # Is committed after when calculating fps
+        print(logdict)
+        self.logger.log(
+            logdict, step=iteration, commit=False
+        )  # Is committed after when calculating fps
 
     def load(self, load_location, continue_iterations=True):
         """
@@ -652,7 +767,9 @@ class PPO:
 
         checkpoint = torch.load(load_location)
         self.agent.actor.load_state_dict(checkpoint["actor_state_dict"])
-        for aux_head, aux_head_state_dict in zip(self.agent.actor.aux_heads, checkpoint["aux_head_state_dicts"]):
+        for aux_head, aux_head_state_dict in zip(
+            self.agent.actor.aux_heads, checkpoint["aux_head_state_dicts"]
+        ):
             aux_head.load_state_dict(aux_head_state_dict)
         self.agent.critic.load_state_dict(checkpoint["critic_state_dict"])
         self.agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -680,7 +797,9 @@ class PPO:
                 "epoch": current_step,
                 "total_steps": self.total_steps,
                 "actor_state_dict": self.agent.actor.state_dict(),
-                "aux_head_state_dicts": tuple(aux_head.state_dict() for aux_head in self.agent.actor.aux_heads),
+                "aux_head_state_dicts": tuple(
+                    aux_head.state_dict() for aux_head in self.agent.actor.aux_heads
+                ),
                 "critic_state_dict": self.agent.critic.state_dict(),
                 "optimizer_state_dict": self.agent.optimizer.state_dict(),
                 # TODO save/load reward normalization mean, std, count

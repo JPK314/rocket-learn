@@ -17,6 +17,8 @@ from rlgym.gym import Gym
 from rlgym.utils.state_setters import DefaultState
 from tabulate import tabulate
 
+from rocketsimvisualizer import VisualizerThread
+
 import rocket_learn.agent.policy
 from rocket_learn.agent.discrete_policy import DiscretePolicy
 from rocket_learn.agent.types import PretrainedAgents
@@ -61,6 +63,7 @@ class RedisRolloutWorker:
                  human_agent=None, force_paging=False, auto_minimize=True, tick_skip=0,
                  local_cache_name=None,
                  force_old_deterministic=False,
+                 force_current_deterministic=False,
                  deterministic_streamer=False,
                  gamemode_weights=None,
                  batch_mode=False,
@@ -95,6 +98,7 @@ class RedisRolloutWorker:
 
         self.human_agent = human_agent
         self.force_old_deterministic = force_old_deterministic
+        self.force_current_deterministic = force_current_deterministic
 
         if human_agent and pretrained_agents:
             print("** WARNING - Human Player and Pretrained Agents are in conflict. **")
@@ -261,7 +265,7 @@ class RedisRolloutWorker:
 
         return table_str
 
-    def run(self):  # Mimics Thread
+    def run(self, v: VisualizerThread = None):  # Mimics Thread
         """
         begin processing in already launched match and push to redis
         """
@@ -286,7 +290,7 @@ class RedisRolloutWorker:
                 latest_version = available_version
                 updated_agent = _unserialize_model(model_bytes)
                 self.current_agent = updated_agent
-                if self.streamer_mode and self.deterministic_streamer:
+                if self.force_current_deterministic or (self.streamer_mode and self.deterministic_streamer):
                     self.current_agent.deterministic = True
 
             n += 1
@@ -363,9 +367,8 @@ class RedisRolloutWorker:
                 result = rocket_learn.utils.generate_episode.generate_episode(self.env, agents, versions, evaluate=True,
                                                                               scoreboard=self.scoreboard,
                                                                               progress=self.live_progress,
-                                                                              selector_skip_k=self.selector_skip_k,
-                                                                              force_selector_choice=self.force_selector_choice,
-                                                                              eval_setter=self.eval_setter)
+                                                                              eval_setter=self.eval_setter,
+                                                                              v=v)
                 rollouts = []
                 print(colored("Evaluation finished, goal differential:", 'magenta'), result)
                 print()
@@ -378,7 +381,8 @@ class RedisRolloutWorker:
                     rollouts, result, trajectory_states = rocket_learn.utils.generate_episode.generate_episode(
                         self.env, agents, versions,
                         evaluate=False,
-                        scoreboard=self.scoreboard)
+                        scoreboard=self.scoreboard,
+                        v=v)
 
                     # Happens sometimes, unknown reason
                     if len(rollouts[0].observations) <= 1:

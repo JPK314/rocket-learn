@@ -1,15 +1,17 @@
 from abc import abstractmethod
-from typing import Optional, List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch as th
 from torch import nn
 
+
 class AuxHead(nn.Module):
-    def __init__(self, net: nn.Module, deterministic=False):
+    def __init__(self, net: nn.Module, weight: th.Tensor, deterministic=False):
         super().__init__()
         self.net = net
         self.deterministic = deterministic
+        self.weight = weight
 
     def forward(self, obs):
         logits = self.net(obs)
@@ -19,7 +21,7 @@ class AuxHead(nn.Module):
         """
         Defines how the output of the shared body turns into a prediction.
         :param body_out: Tensor where 0th dimension is batching dimension, and other dimensions form the tensor for a single body output.
-        
+
         :return: Tuple of torch Tensors.
         """
         return self(body_out)
@@ -44,6 +46,20 @@ class AuxHead(nn.Module):
         :param labels: torch Tensor of labels (th.from_numpy(numpy_array)).
         :param predictions: Tensor where 0th dimension is parallel with labels, and the other dimensions form the tensor for the head output.
 
-        :return: torch Tensor of grades, or tuple of torch Tensors of grades.
+        :return: tuple of torch Tensors of grades.
         """
         raise NotImplementedError
+
+    @abstractmethod
+    def get_weight(self):
+        """
+        :return: get weight tuple for this head
+        """
+        return self.weight
+
+    @abstractmethod
+    def set_weight(self, weight: th.Tensor):
+        """
+        :return: get weight tuple for this head
+        """
+        self.weight = weight
