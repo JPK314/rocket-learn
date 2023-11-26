@@ -721,10 +721,11 @@ class PPO:
 
             # Set up computational graph for optimizer
             self.agent.optimizer.zero_grad(set_to_none=self.zero_grads_with_none)
-            main_loss.backward(retain_graph=True)
+            total_loss = main_loss
             aux_weights = self.agent.actor.get_aux_head_weights()
             for aux_weight, aux_loss in zip(aux_weights, aux_losses):
-                (aux_weight * aux_loss).backward(retain_graph=True)
+                total_loss += aux_weight * aux_loss
+            total_loss.backward()
             # Clip grad norm
             if self.max_grad_norm is not None:
                 clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
