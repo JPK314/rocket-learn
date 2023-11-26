@@ -350,7 +350,7 @@ class PPO:
             if p.grad is not None:
                 grad = p.grad.data.ravel()
             else:
-                grad = th.zeros(p.shape).ravel()
+                grad = th.zeros(p.shape, dtype=th.float, device=self.device).ravel()
 
             grads.append(grad)
         return th.cat(grads)
