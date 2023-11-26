@@ -345,14 +345,15 @@ class PPO:
 
     def _get_flat_gradient(self, model):
         flat = th.tensor([], dtype=th.float, device=self.device)
+        grads = []
         for p in model.parameters():
             if p.grad is not None:
                 grad = p.grad.data.ravel()
             else:
                 grad = th.zeros(p.shape).ravel()
 
-            flat = th.cat((flat, grad))
-        return flat
+            grads.append(grad)
+        return th.cat(grads)
 
     def calculate(self, buffers: Iterator[ExperienceBuffer], iteration):
         """
@@ -680,15 +681,16 @@ class PPO:
                 # pb.update(self.minibatch_size)
 
             # Get loss gradients for aux weight update
+            self.agent.optimizer.zero_grad(set_to_none=True)
             th.log(main_loss).backward(retain_graph=True)
             main_loss_grad = self._get_flat_gradient(self.agent.actor)
             self.hist_main_loss_grads.append(main_loss_grad)
-            total_grad = main_loss_grad
             for idx, aux_loss in enumerate(aux_losses):
+                self.agent.optimizer.zero_grad(set_to_none=True)
                 th.log(aux_loss).backward(retain_graph=True)
-                new_grad = self._get_flat_gradient(self.agent.actor)
-                self.hist_aux_loss_grads[idx].append(new_grad - total_grad)
-                total_grad = new_grad
+                self.hist_aux_loss_grads[idx].append(
+                    self._get_flat_gradient(self.agent.actor)
+                )
             self.aux_weight_timer += 1
             update_vec = th.tensor(
                 [0] * len(self.hist_aux_loss_grads), device=self.device, dtype=th.float
@@ -731,7 +733,6 @@ class PPO:
                 clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
 
             self.agent.optimizer.step()
-            self.agent.optimizer.zero_grad(set_to_none=self.zero_grads_with_none)
 
         t1 = time.perf_counter_ns()
 
