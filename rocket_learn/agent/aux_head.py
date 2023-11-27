@@ -62,4 +62,4 @@ class AuxHead(nn.Module):
         """
         :return: get weight tuple for this head
         """
-        self.weight = weight
+        self.weight = th.clamp(weight, min=0)

@@ -344,7 +344,6 @@ class PPO:
         return advantages  # , v_targets
 
     def _get_flat_gradient(self, model):
-        flat = th.tensor([], dtype=th.float, device=self.device)
         grads = []
         for p in model.parameters():
             if p.grad is not None:
@@ -769,10 +768,7 @@ class PPO:
 
         checkpoint = torch.load(load_location)
         self.agent.actor.load_state_dict(checkpoint["actor_state_dict"])
-        for aux_head, aux_head_state_dict in zip(
-            self.agent.actor.aux_heads, checkpoint["aux_head_state_dicts"]
-        ):
-            aux_head.load_state_dict(aux_head_state_dict)
+        self.agent.actor.aux_heads = checkpoint["aux_heads"]
         self.agent.critic.load_state_dict(checkpoint["critic_state_dict"])
         self.agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
@@ -799,9 +795,7 @@ class PPO:
                 "epoch": current_step,
                 "total_steps": self.total_steps,
                 "actor_state_dict": self.agent.actor.state_dict(),
-                "aux_head_state_dicts": tuple(
-                    aux_head.state_dict() for aux_head in self.agent.actor.aux_heads
-                ),
+                "aux_heads": tuple(self.agent.actor.aux_heads),
                 "critic_state_dict": self.agent.critic.state_dict(),
                 "optimizer_state_dict": self.agent.optimizer.state_dict(),
                 # TODO save/load reward normalization mean, std, count
