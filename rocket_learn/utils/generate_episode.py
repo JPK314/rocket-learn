@@ -20,100 +20,6 @@ from rocket_learn.utils.truncated_condition import (
 )
 
 
-def get_feature_importance(policy, obs):
-    n_linspace = 100
-    obs_ranges = []
-    with open("obs_range.txt", "r") as f:
-        for line in f:
-            min_val, max_val = [float(v) for v in line.split(",")]
-            obs_ranges.append(np.linspace(min_val, max_val, n_linspace))
-    p0_obs = obs[0]
-    body_out = policy(p0_obs)
-    body_out_cuda = body_out.to(torch.device("cuda:0"))
-    aux_head_preds = policy.get_aux_head_predictions(body_out_cuda)
-    team_pred = aux_head_preds[0][0].item()
-    modded_obs = p0_obs.copy()
-    batch_mod_obs = np.repeat(modded_obs[np.newaxis, :], n_linspace, axis=0)
-    pred_ranges = []
-    for idx, obs_range in enumerate(obs_ranges):
-        batch_mod_obs[:, idx] = obs_range
-        batch_mod_body_out = policy(batch_mod_obs)
-        batch_mod_body_out_cuda = batch_mod_body_out.to(torch.device("cuda:0"))
-        batch_mod_aux_head_preds = policy.get_aux_head_predictions(
-            batch_mod_body_out_cuda
-        )
-        batch_mod_team_pred = batch_mod_aux_head_preds[0]
-        pred_ranges.append(
-            (
-                torch.min(batch_mod_team_pred).item(),
-                torch.max(batch_mod_team_pred).item(),
-            )
-        )
-    pred_ranges_sorted = list(enumerate(pred_ranges))
-    pred_ranges_sorted.sort(key=lambda x: x[1][1] - x[1][0], reverse=True)
-    print("\n".join(list(f"{idx}, {r[1]-r[0]}" for (idx, r) in pred_ranges_sorted)))
-    print("oh boy")
-
-
-def get_feature_importance2(env, policy, obs, pct_max_range, step):
-    n_linspace = 100
-    obs_rangess = [[] for _ in obs]
-    file_line = 0
-    with open("obs_range.txt", "r") as f:
-        for line in f:
-            min_val, max_val = [float(v) for v in line.split(",")]
-            val_range = pct_max_range * (max_val - min_val)
-            for idx, o in enumerate(obs):
-                obs_rangess[idx].append(
-                    np.linspace(
-                        max(min_val, o[file_line] - val_range),
-                        min(max_val, o[file_line] + val_range),
-                        n_linspace,
-                    )
-                )
-            file_line += 1
-    body_out = policy(obs)
-    dist = policy.get_action_distribution(body_out)
-    base_vals = torch.sum(
-        dist.probs[:, :, env._match._action_parser._jump_actions], axis=2
-    )
-    modded_obs = obs.copy()
-    batch_mod_obs = np.repeat(modded_obs[np.newaxis, :], n_linspace, axis=0)
-    pred_rangess = []
-    for idx1, obs_ranges in enumerate(obs_rangess):
-        pred_rangess.append([])
-        for idx2, obs_range in enumerate(obs_ranges):
-            batch_mod_obs[:, idx1, idx2] = obs_range
-            batch_mod_body_out = policy(batch_mod_obs[:, idx1, :])
-            batch_mod_dist = policy.get_action_distribution(batch_mod_body_out)
-            batch_mod_jump_pref = torch.sum(
-                batch_mod_dist.probs[:, 0, env._match._action_parser._jump_actions],
-                axis=1,
-            )
-            pred_rangess[-1].append(
-                (
-                    torch.min(batch_mod_jump_pref).item(),
-                    torch.max(batch_mod_jump_pref).item(),
-                )
-            )
-    pred_rangess_sorted = [list(enumerate(pred_ranges)) for pred_ranges in pred_rangess]
-    for pred_ranges_sorted in pred_rangess_sorted:
-        pred_ranges_sorted.sort(key=lambda x: x[1][1] - x[1][0], reverse=True)
-    with open("feature_importance_steps.txt", "a") as f:
-        f.write(f"--------------STEP {step}--------------\n")
-        for idx1 in range(20):
-            f.write(
-                "|".join(
-                    [
-                        f"{pred_ranges_sorted[idx1][0]}, {pred_ranges_sorted[idx1][1][1] - pred_ranges_sorted[idx1][1][0]}"
-                        for pred_ranges_sorted in pred_rangess_sorted
-                    ]
-                )
-                + "\n"
-            )
-        f.write("\n\n")
-
-
 def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), evaluate=False, scoreboard=None, progress=True, v: VisualizerThread = None) -> (List[ExperienceBuffer], int):  # type: ignore
     """
     create experience buffer data by interacting with the environment(s)
@@ -180,21 +86,9 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
     ]
 
     trajectory_states = []
-    # body_outs = [[] for _ in range(sum(latest_policy_indices))]
-    # step_outs_file = open("step_outs.txt", "w")
-    # first_jumper_file = open("first_jumper.txt", "a")
-    # someone_has_jumped = False
-    # jumpers = []
-    # t0 = time.time()
     b = o = 0
     with torch.no_grad():
         while True:
-            # t1 = time.time()
-            # time.sleep(max(0, 8 / 120 - (t1 - t0)))
-            # t0 = t1
-            # all_indices = []
-            # all_actions = []
-            # all_log_probs = []
             all_indices = [None] * len(policies)
             all_actions = [None] * len(policies)
             all_log_probs = [None] * len(policies)
@@ -223,26 +117,12 @@ def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), e
                         [obs for idx, obs in enumerate(observations) if idx in idxs],
                         axis=0,
                     )
-                # get_feature_importance2(env, policy, obs, 0.1, progress.n)
                 body_out = policy(obs)
-                # body_out_cuda = body_out.to(torch.device("cuda:0"))
-                # aux_head_preds = policy.get_aux_head_predictions(body_out_cuda)
-                # print(progress.n)
-                # print(aux_head_preds[0].detach().cpu().numpy())
-                # step_outs_file.write("\n" + str(progress.n) + " steps")
-                # step_outs_file.write(
-                #     "\n" + repr(aux_head_preds[0].detach().cpu().numpy())
-                # )
                 dist = policy.get_action_distribution(body_out)
                 action_indices = policy.sample_action(dist)
-                # step_outs_file.write("\n" + repr(action_indices))
-                # step_outs_file.flush()
-                # time.sleep(0.05)
                 log_probs = policy.log_prob(dist, action_indices)
                 action_indices_list = list(action_indices.numpy())
                 log_probs_list = list(log_probs.numpy())
-                # if progress.n > 114:
-                #     get_feature_importance2(env, policy, obs, 0.1, progress.n)
                 for i, idx in enumerate(idxs):
                     all_indices[idx] = action_indices_list[i]
                     all_log_probs[idx] = log_probs_list[i]

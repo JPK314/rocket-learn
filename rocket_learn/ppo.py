@@ -754,7 +754,7 @@ class PPO:
             logdict[aux_head_log_name] = tot_aux_heads_loss[idx]
             logdict[f"{aux_head_log_name}_weight"] = aux_weights[idx]
 
-        print(logdict)
+        # print(logdict)
         self.logger.log(
             logdict, step=iteration, commit=False
         )  # Is committed after when calculating fps
