@@ -540,144 +540,128 @@ class PPO:
                     )
                 )
             ]
-            for i in range(0, self.batch_size, self.minibatch_size):
-                # Note: Will cut off final few samples
 
-                if isinstance(obs_tensor, tuple):
-                    obs = tuple(
-                        o[i : i + self.minibatch_size].to(self.device)
-                        for o in obs_batch
-                    )
+            if isinstance(obs_tensor, tuple):
+                obs = tuple(o.to(self.device) for o in obs_batch)
+            else:
+                obs = obs_batch.to(self.device)
+
+            act = act_batch.to(self.device)
+            # adv = advantages_batch[i:i + self.minibatch_size].to(self.device)
+            ret = returns_batch.to(self.device)
+
+            aux_heads_labels = tuple(
+                aux_head_labels_batch.to(self.device)
+                for aux_head_labels_batch in aux_heads_labels_batch
+            )
+
+            old_log_prob = log_prob_batch.to(self.device)
+
+            # TODO optimization: use forward_actor_critic instead of separate in case shared, also use GPU
+            try:
+                (
+                    log_prob,
+                    entropy,
+                    aux_heads_loss,
+                    dist,
+                ) = self.evaluate_actions_aux_heads(
+                    obs, act, aux_heads_labels
+                )  # Assuming obs and actions as input
+            except RuntimeError as e:
+                print("RuntimeError in evaluate_actions", e)
+                (
+                    log_prob,
+                    entropy,
+                    aux_heads_loss,
+                    dist,
+                ) = self.evaluate_actions_aux_heads(
+                    obs, act, aux_heads_labels
+                )  # Assuming obs and actions as input
+            except ValueError as e:
+                print("ValueError in evaluate_actions", e)
+                continue
+
+            ratio = torch.exp(log_prob - old_log_prob)
+
+            try:
+                values_pred = self.agent.critic(obs)
+            except RuntimeError as e:
+                print("RuntimeError in critic 2", e)
+                values_pred = self.agent.critic(obs)
+
+            values_pred = th.squeeze(values_pred)
+            adv = ret - values_pred.detach()
+            adv = (adv - th.mean(adv)) / (th.std(adv) + 1e-8)
+
+            # clipped surrogate loss
+            policy_loss_1 = adv * ratio
+            policy_loss_2 = adv * th.clamp(
+                ratio, 1 - self.clip_range, 1 + self.clip_range
+            )
+            policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
+
+            # **If we want value clipping, add it here**
+            value_loss = F.mse_loss(ret, values_pred)
+
+            if entropy is None:
+                # Approximate entropy when no analytical form
+                entropy_loss = -th.mean(-log_prob)
+            else:
+                entropy_loss = entropy
+
+            main_loss = (
+                policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
+            )
+            for idx, aux_head_loss in enumerate(aux_heads_loss):
+                aux_losses[idx] = aux_head_loss
+
+            loss = (
+                policy_loss
+                + self.ent_coef * entropy_loss
+                + self.vf_coef * value_loss
+                + sum(aux_heads_loss)
+            )
+
+            if not torch.isfinite(loss).all():
+                print("Non-finite loss, skipping", n)
+                print("\tPolicy loss:", policy_loss)
+                print("\tEntropy loss:", entropy_loss)
+                print("\tValue loss:", value_loss)
+                print("\tAux loss:", aux_heads_loss)
+                print("\tTotal loss:", loss)
+                print("\tRatio:", ratio)
+                print("\tAdv:", adv)
+                print("\tLog prob:", log_prob)
+                print("\tOld log prob:", old_log_prob)
+                print("\tEntropy:", entropy)
+                print(
+                    "\tActor has inf:",
+                    any(not p.isfinite().all() for p in self.agent.actor.parameters()),
+                )
+                print(
+                    "\tCritic has inf:",
+                    any(not p.isfinite().all() for p in self.agent.critic.parameters()),
+                )
+                print("\tReward as inf:", not np.isfinite(ep_rewards).all())
+                if isinstance(obs, tuple):
+                    for j in range(len(obs)):
+                        print(f"\tObs[{j}] has inf:", not obs[j].isfinite().all())
                 else:
-                    obs = obs_batch[i : i + self.minibatch_size].to(self.device)
+                    print("\tObs has inf:", not obs.isfinite().all())
+                continue
 
-                act = act_batch[i : i + self.minibatch_size].to(self.device)
-                # adv = advantages_batch[i:i + self.minibatch_size].to(self.device)
-                ret = returns_batch[i : i + self.minibatch_size].to(self.device)
+            # Unbiased low variance KL div estimator from http://joschu.net/blog/kl-approx.html
+            total_kl_div += th.mean((ratio - 1) - (log_prob - old_log_prob)).item()
+            tot_loss += loss.item()
+            tot_policy_loss += policy_loss.item()
+            tot_entropy_loss += entropy_loss.item()
+            tot_value_loss += value_loss.item()
+            for idx, aux_head_loss in enumerate(aux_heads_loss):
+                tot_aux_heads_loss[idx] += aux_head_loss.item()
 
-                aux_heads_labels = tuple(
-                    aux_head_labels_batch[i : i + self.minibatch_size].to(self.device)
-                    for aux_head_labels_batch in aux_heads_labels_batch
-                )
-
-                old_log_prob = log_prob_batch[i : i + self.minibatch_size].to(
-                    self.device
-                )
-
-                # TODO optimization: use forward_actor_critic instead of separate in case shared, also use GPU
-                try:
-                    (
-                        log_prob,
-                        entropy,
-                        aux_heads_loss,
-                        dist,
-                    ) = self.evaluate_actions_aux_heads(
-                        obs, act, aux_heads_labels
-                    )  # Assuming obs and actions as input
-                except RuntimeError as e:
-                    print("RuntimeError in evaluate_actions", e)
-                    (
-                        log_prob,
-                        entropy,
-                        aux_heads_loss,
-                        dist,
-                    ) = self.evaluate_actions_aux_heads(
-                        obs, act, aux_heads_labels
-                    )  # Assuming obs and actions as input
-                except ValueError as e:
-                    print("ValueError in evaluate_actions", e)
-                    continue
-
-                ratio = torch.exp(log_prob - old_log_prob)
-
-                try:
-                    values_pred = self.agent.critic(obs)
-                except RuntimeError as e:
-                    print("RuntimeError in critic 2", e)
-                    values_pred = self.agent.critic(obs)
-
-                values_pred = th.squeeze(values_pred)
-                adv = ret - values_pred.detach()
-                adv = (adv - th.mean(adv)) / (th.std(adv) + 1e-8)
-
-                # clipped surrogate loss
-                policy_loss_1 = adv * ratio
-                policy_loss_2 = adv * th.clamp(
-                    ratio, 1 - self.clip_range, 1 + self.clip_range
-                )
-                policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
-
-                # **If we want value clipping, add it here**
-                value_loss = F.mse_loss(ret, values_pred)
-
-                if entropy is None:
-                    # Approximate entropy when no analytical form
-                    entropy_loss = -th.mean(-log_prob)
-                else:
-                    entropy_loss = entropy
-                main_loss += (
-                    policy_loss
-                    + self.ent_coef * entropy_loss
-                    + self.vf_coef * value_loss
-                )
-                for idx, aux_head_loss in enumerate(aux_heads_loss):
-                    aux_losses[idx] += aux_head_loss
-
-                loss = (
-                    policy_loss
-                    + self.ent_coef * entropy_loss
-                    + self.vf_coef * value_loss
-                    + sum(aux_heads_loss)
-                ) / (self.batch_size / self.minibatch_size)
-
-                if not torch.isfinite(loss).all():
-                    print("Non-finite loss, skipping", n)
-                    print("\tPolicy loss:", policy_loss)
-                    print("\tEntropy loss:", entropy_loss)
-                    print("\tValue loss:", value_loss)
-                    print("\tAux loss:", aux_heads_loss)
-                    print("\tTotal loss:", loss)
-                    print("\tRatio:", ratio)
-                    print("\tAdv:", adv)
-                    print("\tLog prob:", log_prob)
-                    print("\tOld log prob:", old_log_prob)
-                    print("\tEntropy:", entropy)
-                    print(
-                        "\tActor has inf:",
-                        any(
-                            not p.isfinite().all()
-                            for p in self.agent.actor.parameters()
-                        ),
-                    )
-                    print(
-                        "\tCritic has inf:",
-                        any(
-                            not p.isfinite().all()
-                            for p in self.agent.critic.parameters()
-                        ),
-                    )
-                    print("\tReward as inf:", not np.isfinite(ep_rewards).all())
-                    if isinstance(obs, tuple):
-                        for j in range(len(obs)):
-                            print(f"\tObs[{j}] has inf:", not obs[j].isfinite().all())
-                    else:
-                        print("\tObs has inf:", not obs.isfinite().all())
-                    continue
-
-                # Unbiased low variance KL div estimator from http://joschu.net/blog/kl-approx.html
-                total_kl_div += th.mean((ratio - 1) - (log_prob - old_log_prob)).item()
-                tot_loss += loss.item()
-                tot_policy_loss += policy_loss.item()
-                tot_entropy_loss += entropy_loss.item()
-                tot_value_loss += value_loss.item()
-                for idx, aux_head_loss in enumerate(aux_heads_loss):
-                    tot_aux_heads_loss[idx] += aux_head_loss.item()
-
-                tot_clipped += th.mean(
-                    (th.abs(ratio - 1) > self.clip_range).float()
-                ).item()
-                n += 1
-                # pb.update(self.minibatch_size)
+            tot_clipped += th.mean((th.abs(ratio - 1) > self.clip_range).float()).item()
+            n += 1
+            # pb.update(self.minibatch_size)
 
             # Get loss gradients for aux weight update
             self.agent.optimizer.zero_grad(set_to_none=True)
@@ -721,11 +705,11 @@ class PPO:
                 ]
 
             # Set up computational graph for optimizer
-            self.agent.optimizer.zero_grad(set_to_none=self.zero_grads_with_none)
+            self.agent.optimizer.zero_grad(set_to_none=True)
             total_loss = main_loss
             aux_weights = self.agent.actor.get_aux_head_weights()
             for aux_weight, aux_loss in zip(aux_weights, aux_losses):
-                total_loss += aux_weight * aux_loss
+                total_loss = total_loss + aux_weight * aux_loss
             total_loss.backward()
             # Clip grad norm
             if self.max_grad_norm is not None:
