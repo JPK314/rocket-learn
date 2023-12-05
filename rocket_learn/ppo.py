@@ -71,6 +71,7 @@ class PPO:
         aux_heads_log_names=None,
         aux_weight_update_freq=5,
         aux_weight_learning_rate=1,
+        keep_saved_aux_weights=True,
     ):
         self.tick_skip_starts = tick_skip_starts
         self.num_actions = num_actions
@@ -91,6 +92,7 @@ class PPO:
         self.hist_main_loss_grads = []
         self.hist_aux_loss_grads = [[] for _ in range(total_aux_losses)]
         self.aux_weight_learning_rate = aux_weight_learning_rate
+        self.keep_saved_aux_weights = keep_saved_aux_weights
         self.agent.actor.aux_heads = device_aux_heads
         if not aux_heads_log_names:
             aux_heads_log_names = [
@@ -751,10 +753,14 @@ class PPO:
         """
 
         checkpoint = torch.load(load_location)
+        initial_weights = self.agent.actor.get_aux_head_weights()
         self.agent.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.agent.actor.aux_heads = checkpoint["aux_heads"]
         self.agent.critic.load_state_dict(checkpoint["critic_state_dict"])
         self.agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if not self.keep_saved_aux_weights:
+            loaded_weights = self.agent.actor.get_aux_head_weights()
+            self.agent.actor.update_aux_head_weights(initial_weights - loaded_weights)
 
         if continue_iterations:
             self.starting_iteration = checkpoint["epoch"]
