@@ -775,6 +775,9 @@ class PPO:
 
         checkpoint = torch.load(load_location)
         initial_weights = self.agent.actor.get_aux_head_weights()
+        initial_head_weight_maxes = []
+        for aux_head in self.agent.actor.aux_heads:
+            initial_head_weight_maxes.append(aux_head.max_weight_tensor)
         self.agent.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.agent.actor.aux_heads = checkpoint["aux_heads"]
         self.agent.critic.load_state_dict(checkpoint["critic_state_dict"])
@@ -782,7 +785,10 @@ class PPO:
         if not self.keep_saved_aux_weights:
             loaded_weights = self.agent.actor.get_aux_head_weights()
             self.agent.actor.update_aux_head_weights(initial_weights - loaded_weights)
-
+        for initial_head_weight_max, aux_head in zip(
+            initial_head_weight_maxes, self.agent.actor.aux_heads
+        ):
+            aux_head.max_weight_tensor = initial_head_weight_max
         if continue_iterations:
             self.starting_iteration = checkpoint["epoch"]
             self.total_steps = checkpoint["total_steps"]

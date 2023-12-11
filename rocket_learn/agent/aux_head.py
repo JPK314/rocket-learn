@@ -7,11 +7,18 @@ from torch import nn
 
 
 class AuxHead(nn.Module):
-    def __init__(self, net: nn.Module, weight: th.Tensor, deterministic=False):
+    def __init__(
+        self,
+        net: nn.Module,
+        weight: th.Tensor,
+        max_weight_tensor: th.Tensor,
+        deterministic=False,
+    ):
         super().__init__()
         self.net = net
         self.deterministic = deterministic
         self.weight = weight
+        self.max_weight_tensor = max_weight_tensor
 
     def forward(self, obs):
         logits = self.net(obs)
