@@ -1,20 +1,20 @@
 # Constants for consistent key lookup
 import pickle
 import zlib
-from typing import List, Optional, Union, Dict
+from typing import Dict, List, Optional, Union
 
+import msgpack
+import msgpack_numpy as m
 import numpy as np
 from redis import Redis
 from rlgym.utils.gamestates import GameState
-from trueskill import Rating, SIGMA
+from trueskill import SIGMA, Rating
 
-from rocket_learn.agent.types import PretrainedAgents
 from rocket_learn.agent.discrete_policy import DiscretePolicy
+from rocket_learn.agent.types import PretrainedAgents
 from rocket_learn.experience_buffer import ExperienceBuffer
 from rocket_learn.utils.batched_obs_builder import BatchedObsBuilder
 from rocket_learn.utils.gamestate_encoding import encode_gamestate
-import msgpack
-import msgpack_numpy as m
 
 PRETRAINED_QUALITIES = "pretrained-qualities-{}"
 QUALITIES = "qualities-{}"
@@ -24,6 +24,7 @@ N_UPDATES = "num-updates"
 
 MODEL_LATEST = "model-latest"
 VERSION_LATEST = "model-version"
+ITERATION_LATEST = "model-iteration"
 
 ROLLOUTS = "rollout"
 OPPONENT_MODELS = "opponent-models"
@@ -32,8 +33,16 @@ CONTRIBUTORS = "contributors"
 LATEST_RATING_ID = "latest-rating-id"
 EXPERIENCE_PER_MODE = "experience-per-mode"
 _ALL = (
-    N_UPDATES, MODEL_LATEST, VERSION_LATEST, ROLLOUTS, OPPONENT_MODELS,
-    WORKER_IDS, CONTRIBUTORS, LATEST_RATING_ID, EXPERIENCE_PER_MODE)
+    N_UPDATES,
+    MODEL_LATEST,
+    VERSION_LATEST,
+    ROLLOUTS,
+    OPPONENT_MODELS,
+    WORKER_IDS,
+    CONTRIBUTORS,
+    LATEST_RATING_ID,
+    EXPERIENCE_PER_MODE,
+)
 
 m.patch()
 
@@ -114,7 +123,14 @@ def get_rating(gamemode: str, model_id: str, redis: Redis) -> Rating:
     return Rating(*_unserialize(redis.hget(quality_key, model_id)))
 
 
-def add_pretrained_ratings(redis: Redis, pretrained_agents: PretrainedAgents, gamemodes=("1v1", "2v2", "3v3"), starting_rating=0, starting_sigma=SIGMA, override=False):
+def add_pretrained_ratings(
+    redis: Redis,
+    pretrained_agents: PretrainedAgents,
+    gamemodes=("1v1", "2v2", "3v3"),
+    starting_rating=0,
+    starting_sigma=SIGMA,
+    override=False,
+):
     """
     Add pretrained agents to redis.
     :param redis: The redis client.
@@ -129,27 +145,41 @@ def add_pretrained_ratings(redis: Redis, pretrained_agents: PretrainedAgents, ga
             for gamemode in gamemodes:
                 qualities = {
                     k.decode("utf-8"): Rating(*_unserialize(v))
-                    for k, v in redis.hgetall(PRETRAINED_QUALITIES.format(gamemode)).items()
+                    for k, v in redis.hgetall(
+                        PRETRAINED_QUALITIES.format(gamemode)
+                    ).items()
                 }
                 total_keys = []
                 if isinstance(agent, DiscretePolicy):
                     for mode in "stochastic", "deterministic":
                         total_keys.append(f"{config['key']}-{mode}")
                 else:
-                    total_keys.append(config['key'])
+                    total_keys.append(config["key"])
 
                 for key in total_keys:
                     if override or key not in qualities:
-                        redis.hset(PRETRAINED_QUALITIES.format(
-                            gamemode), key, _serialize(tuple(Rating(starting_rating, starting_sigma))))
+                        redis.hset(
+                            PRETRAINED_QUALITIES.format(gamemode),
+                            key,
+                            _serialize(tuple(Rating(starting_rating, starting_sigma))),
+                        )
 
 
-def encode_buffers(buffers: List[ExperienceBuffer], all_aux_labels, return_obs=True, return_states=True, return_rewards=True):
+def encode_buffers(
+    buffers: List[ExperienceBuffer],
+    all_aux_labels,
+    return_obs=True,
+    return_states=True,
+    return_rewards=True,
+):
     res = []
 
     if return_states:
-        states = np.asarray([encode_gamestate(info["state"])
-                            for info in buffers[0].infos] if len(buffers) > 0 else [])
+        states = np.asarray(
+            [encode_gamestate(info["state"]) for info in buffers[0].infos]
+            if len(buffers) > 0
+            else []
+        )
         res.append(states)
 
     if return_obs:
@@ -171,8 +201,16 @@ def encode_buffers(buffers: List[ExperienceBuffer], all_aux_labels, return_obs=T
     return res
 
 
-def decode_buffers(enc_buffers, versions, has_obs, has_states, has_rewards,
-                   obs_build_factory=None, rew_func_factory=None, act_parse_factory=None):
+def decode_buffers(
+    enc_buffers,
+    versions,
+    has_obs,
+    has_states,
+    has_rewards,
+    obs_build_factory=None,
+    rew_func_factory=None,
+    act_parse_factory=None,
+):
     assert has_states or has_obs, "Must have at least one of obs or states"
     assert has_states or has_rewards, "Must have at least one of rewards or states"
     # TODO obs+no reward?
@@ -215,16 +253,25 @@ def decode_buffers(enc_buffers, versions, has_obs, has_states, has_rewards,
         act_parser = act_parse_factory()
         if isinstance(obs_builder, BatchedObsBuilder):
             # TODO support states+no rewards
-            assert game_states is not None and rewards is not None, "Must have both game states and rewards"
+            assert (
+                game_states is not None and rewards is not None
+            ), "Must have both game states and rewards"
             obs = obs_builder.batched_build_obs(game_states[:-1])
-            prev_actions = act_parser.parse_actions(actions.reshape((-1,) + actions.shape[2:]).copy(), None).reshape(
-                actions.shape[:2] + (8,))
+            prev_actions = act_parser.parse_actions(
+                actions.reshape((-1,) + actions.shape[2:]).copy(), None
+            ).reshape(actions.shape[:2] + (8,))
             prev_actions = np.concatenate(
-                (np.zeros((actions.shape[0], 1, 8)), prev_actions[:, :-1]), axis=1)
+                (np.zeros((actions.shape[0], 1, 8)), prev_actions[:, :-1]), axis=1
+            )
             obs_builder.add_actions(obs, prev_actions)
             buffers = [
-                ExperienceBuffer(observations=[obs[i]], actions=actions[i], rewards=rewards[i], dones=dones[i],
-                                 log_probs=log_probs[i])
+                ExperienceBuffer(
+                    observations=[obs[i]],
+                    actions=actions[i],
+                    rewards=rewards[i],
+                    dones=dones[i],
+                    log_probs=log_probs[i],
+                )
                 for i in range(len(obs))
             ]
             return buffers, game_states
@@ -240,13 +287,14 @@ def decode_buffers(enc_buffers, versions, has_obs, has_states, has_rewards,
             ]
 
             env_actions = [
-                act_parser.parse_actions(
-                    actions[:, s, :].copy(), game_states[s])
+                act_parser.parse_actions(actions[:, s, :].copy(), game_states[s])
                 for s in range(actions.shape[1])
             ]
 
-            obss = [obs_builder.build_obs(p, game_states[0], np.zeros(8))
-                    for i, p in enumerate(game_states[0].players)]
+            obss = [
+                obs_builder.build_obs(p, game_states[0], np.zeros(8))
+                for i, p in enumerate(game_states[0].players)
+            ]
             for s, gs in enumerate(game_states[1:]):
                 assert len(gs.players) == len(versions)
                 final = s == len(game_states) - 2
@@ -254,7 +302,7 @@ def decode_buffers(enc_buffers, versions, has_obs, has_states, has_rewards,
                 obss = []
                 i = 0
                 for version in versions:
-                    if version == 'na':
+                    if version == "na":
                         continue  # don't want to rebuild or use prebuilt agents
                     player = gs.players[i]
 
@@ -264,14 +312,20 @@ def decode_buffers(enc_buffers, versions, has_obs, has_states, has_rewards,
                     if rewards is None:
                         if final:
                             rew = rew_func.get_final_reward(
-                                player, gs, env_actions[s][i])
+                                player, gs, env_actions[s][i]
+                            )
                         else:
-                            rew = rew_func.get_reward(
-                                player, gs, env_actions[s][i])
+                            rew = rew_func.get_reward(player, gs, env_actions[s][i])
                     else:
                         rew = rewards[i][s]
                     buffers[i].add_step(
-                        old_obs[i], actions[i][s], rew, final, log_probs[i][s], {"state": gs})
+                        old_obs[i],
+                        actions[i][s],
+                        rew,
+                        final,
+                        log_probs[i][s],
+                        {"state": gs},
+                    )
                     obss.append(obs)
                 i += 1
 
@@ -280,11 +334,13 @@ def decode_buffers(enc_buffers, versions, has_obs, has_states, has_rewards,
         buffers = []
         for i in range(len(obs)):
             buffers.append(
-                ExperienceBuffer(observations=obs[i],
-                                 actions=actions[i],
-                                 rewards=rewards[i],
-                                 dones=dones[i],
-                                 log_probs=log_probs[i],
-                                 aux_labels=all_aux_labels[i])
+                ExperienceBuffer(
+                    observations=obs[i],
+                    actions=actions[i],
+                    rewards=rewards[i],
+                    dones=dones[i],
+                    log_probs=log_probs[i],
+                    aux_labels=all_aux_labels[i],
+                )
             )
         return buffers, game_states
