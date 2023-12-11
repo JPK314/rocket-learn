@@ -518,6 +518,8 @@ class PPO:
         aux_weights = self.agent.actor.get_aux_head_weights()
         t0 = time.perf_counter_ns()
         self.agent.optimizer.zero_grad(set_to_none=self.zero_grads_with_none)
+        main_loss_total_grad = None
+        aux_loss_total_grads = [None for _ in aux_weights]
         for e in range(self.epochs):
             # this is mostly pulled from sb3
 
@@ -667,63 +669,26 @@ class PPO:
             if self.frozen_iterations == 0:
                 self.agent.optimizer.zero_grad(set_to_none=True)
                 th.log(policy_loss).backward(retain_graph=True)
-                main_loss_grad = self._get_flat_gradient(self.agent.actor)
-                self.hist_main_loss_grads.append(main_loss_grad)
+                main_loss_grad = self._get_flat_gradient(self.agent.actor) / self.epochs
+                if main_loss_total_grad is None:
+                    main_loss_total_grad = main_loss_grad
+                else:
+                    with th.no_grad():
+                        main_loss_total_grad = main_loss_total_grad + main_loss_grad
+
                 for idx, aux_loss in enumerate(aux_losses):
                     self.agent.optimizer.zero_grad(set_to_none=True)
                     th.log(aux_loss).backward(retain_graph=True)
-                    self.hist_aux_loss_grads[idx].append(
-                        self._get_flat_gradient(self.agent.actor)
+                    aux_loss_grad = (
+                        self._get_flat_gradient(self.agent.actor) / self.epochs
                     )
-                self.aux_weight_timer += 1
-                with th.no_grad():
-                    update_vec = th.tensor(
-                        [0] * len(self.hist_aux_loss_grads),
-                        device=self.device,
-                        dtype=th.float,
-                    )
-                    if self.aux_weight_timer == self.aux_weight_update_freq:
-                        self.aux_weight_timer = 0
-                        for update_vec_idx, hist_aux_loss_grad in enumerate(
-                            self.hist_aux_loss_grads
-                        ):
-                            for hist_idx, aux_loss_grad in enumerate(
-                                hist_aux_loss_grad
-                            ):
-                                update_vec[update_vec_idx] += (
-                                    th.dot(
-                                        aux_loss_grad,
-                                        self.hist_main_loss_grads[hist_idx],
-                                    )
-                                    / self.aux_weight_update_freq
-                                )
-
-                        scaled_update_vec = self.aux_weight_learning_rate * update_vec
-                        if self.aux_weight_max_change is not None:
-                            abs_scaled_update_vec = th.abs(scaled_update_vec)
-                            max_ind = th.argmax(abs_scaled_update_vec)
-                            max_val = abs_scaled_update_vec[max_ind]
-                            if max_val > self.aux_weight_max_change:
-                                scaled_update_vec = (
-                                    scaled_update_vec
-                                    / max_val
-                                    * self.aux_weight_max_change
-                                )
-
-                        self.agent.actor.update_aux_head_weights(scaled_update_vec)
-                        self.hist_aux_loss_grads = [
-                            [] for _ in range(len(self.hist_aux_loss_grads))
-                        ]
-                        self.hist_main_loss_grads = []
-                        self.hist_aux_loss_grads = [
-                            []
-                            for _ in range(
-                                sum(
-                                    len(aux_head.get_weight())
-                                    for aux_head in self.agent.actor.aux_heads
-                                )
+                    if aux_loss_total_grads[idx] is None:
+                        aux_loss_total_grads[idx] = aux_loss_grad
+                    else:
+                        with th.no_grad():
+                            aux_loss_total_grads[idx] = (
+                                aux_loss_total_grads[idx] + aux_loss_grad
                             )
-                        ]
 
             # Set up computational graph for optimizer
             self.agent.optimizer.zero_grad(set_to_none=True)
@@ -740,6 +705,49 @@ class PPO:
 
             self.agent.optimizer.step()
 
+        self.hist_main_loss_grads.append(main_loss_total_grad)
+        for hist_aux_loss_grad, aux_loss_total_grad in zip(
+            self.hist_aux_loss_grads, aux_loss_total_grads
+        ):
+            hist_aux_loss_grad.append(aux_loss_total_grad)
+
+        # Perform aux weight update
+        self.aux_weight_timer += 1
+        with th.no_grad():
+            if self.aux_weight_timer == self.aux_weight_update_freq:
+                self.aux_weight_timer = 0
+                update_vec = th.tensor(
+                    [0] * len(self.hist_aux_loss_grads),
+                    device=self.device,
+                    dtype=th.float,
+                )
+                for update_vec_idx, hist_aux_loss_grad in enumerate(
+                    self.hist_aux_loss_grads
+                ):
+                    for hist_idx, aux_loss_grad in enumerate(hist_aux_loss_grad):
+                        update_vec[update_vec_idx] += (
+                            th.dot(
+                                aux_loss_grad,
+                                self.hist_main_loss_grads[hist_idx],
+                            )
+                            / self.aux_weight_update_freq
+                        )
+
+                scaled_update_vec = self.aux_weight_learning_rate * update_vec
+                if self.aux_weight_max_change is not None:
+                    abs_scaled_update_vec = th.abs(scaled_update_vec)
+                    max_ind = th.argmax(abs_scaled_update_vec)
+                    max_val = abs_scaled_update_vec[max_ind]
+                    if max_val > self.aux_weight_max_change:
+                        scaled_update_vec = (
+                            scaled_update_vec / max_val * self.aux_weight_max_change
+                        )
+
+                self.agent.actor.update_aux_head_weights(scaled_update_vec)
+                self.hist_main_loss_grads = []
+                self.hist_aux_loss_grads = [
+                    [] for _ in range(len(self.hist_aux_loss_grads))
+                ]
         t1 = time.perf_counter_ns()
 
         assert n > 0
