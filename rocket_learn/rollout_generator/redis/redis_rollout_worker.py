@@ -25,6 +25,7 @@ from rocket_learn.agent.types import PretrainedAgents
 from rocket_learn.matchmaker.base_matchmaker import BaseMatchmaker
 from rocket_learn.rollout_generator.redis.utils import (
     EXPERIENCE_PER_MODE,
+    ITERATION_LATEST,
     LATEST_RATING_ID,
     MODEL_LATEST,
     OPPONENT_MODELS,
@@ -353,6 +354,7 @@ class RedisRolloutWorker:
                     self.streamer_mode and self.deterministic_streamer
                 ):
                     self.current_agent.deterministic = True
+                current_iteration = self.redis.get(ITERATION_LATEST)
 
             n += 1
 
@@ -395,7 +397,7 @@ class RedisRolloutWorker:
                 non_pretrained_idxs = []
                 for i, version in enumerate(versions):
                     if version == -1:
-                        versions[i] = latest_version
+                        versions[i] = -current_iteration
                         agents.append(self.current_agent)
                         latest_version_idxs.append(i)
                         non_pretrained_idxs.append(i)
