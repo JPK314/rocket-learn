@@ -187,7 +187,9 @@ class PPO:
         iteration = self.starting_iteration
         rollout_gen = self.rollout_generator.generate_rollouts()
 
-        self.rollout_generator.update_parameters(self.agent.actor, iteration)
+        self.rollout_generator.update_parameters(
+            self.agent.actor, self.agent.critic, iteration
+        )
 
         while True:
             # pr = cProfile.Profile()

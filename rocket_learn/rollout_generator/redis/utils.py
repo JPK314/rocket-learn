@@ -23,6 +23,7 @@ N_UPDATES = "num-updates"
 # MODEL_FREQ = "model-freq"
 
 MODEL_LATEST = "model-latest"
+CRITIC_LATEST = "critic-latest"
 VERSION_LATEST = "model-version"
 ITERATION_LATEST = "model-iteration"
 

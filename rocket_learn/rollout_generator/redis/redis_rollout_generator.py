@@ -22,6 +22,7 @@ from rocket_learn.rollout_generator.base_rollout_generator import BaseRolloutGen
 from rocket_learn.rollout_generator.redis.utils import (
     _ALL,
     CONTRIBUTORS,
+    CRITIC_LATEST,
     EXPERIENCE_PER_MODE,
     ITERATION_LATEST,
     LATEST_RATING_ID,
@@ -427,15 +428,17 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
         # Inform that new opponent is ready
         self.redis.set(LATEST_RATING_ID, key)
 
-    def update_parameters(self, new_params, iteration):
+    def update_parameters(self, new_params_actor, new_params_critic, iteration):
         """
         update redis (and thus workers) with new model data and save data as future opponent
-        :param new_params: new model parameters
+        :param new_params_actor: new model parameters
         """
-        model_bytes = _serialize_model(new_params)
-        self.redis.set(MODEL_LATEST, model_bytes)
+        actor_model_bytes = _serialize_model(new_params_actor)
+        critic_model_bytes = _serialize_model(new_params_critic)
+        self.redis.set(MODEL_LATEST, actor_model_bytes)
         self.redis.decr(VERSION_LATEST)
         self.redis.set(ITERATION_LATEST, iteration)
+        self.redis.set(CRITIC_LATEST, critic_model_bytes)
 
         # Add pretrained agents' tables if any pretrained agents were passed into init
         if self.pretrained_agents_keys:
@@ -497,7 +500,7 @@ class RedisRolloutGenerator(BaseRolloutGenerator):
 
         if n_updates % self.model_freq == 0:
             print("Adding model to pool...")
-            self._add_opponent(model_bytes)
+            self._add_opponent(actor_model_bytes)
 
         if n_updates % self.save_freq == 0:
             # self.redis.set(MODEL_N.format(self.n_updates // self.save_every), model_bytes)

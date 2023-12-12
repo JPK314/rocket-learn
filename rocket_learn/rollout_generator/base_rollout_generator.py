@@ -10,5 +10,5 @@ class BaseRolloutGenerator(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_parameters(self, new_params, iteration):
+    def update_parameters(self, new_params_actor, new_params_critic, iteration):
         raise NotImplementedError
