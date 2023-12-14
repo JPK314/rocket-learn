@@ -20,11 +20,11 @@ from rocket_learn.utils.truncated_condition import (
 )
 
 
-def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), evaluate=False, scoreboard=None, progress=True, v: VisualizerThread = None) -> (List[ExperienceBuffer], int):  # type: ignore
+def generate_episode(env: Gym, policies, versions, eval_setter=DefaultState(), evaluate=False, scoreboard=None, progress=True, silent_mode=False, v: VisualizerThread = None) -> (List[ExperienceBuffer], int):  # type: ignore
     """
     create experience buffer data by interacting with the environment(s)
     """
-    if progress:
+    if progress and not silent_mode:
         progress = tqdm(unit=" steps")
     else:
         progress = None

@@ -100,11 +100,13 @@ class RedisRolloutWorker:
         visualize=False,
         dodge_deadzone=0.5,
         live_progress=True,
+        silent_mode=False,
     ):
         # TODO model or config+params so workers can recreate just from redis connection?
         self.eval_setter = eval_setter
         self.redis = redis
         self.name = name
+        self.silent_mode = silent_mode
 
         self.matchmaker = matchmaker
 
@@ -261,7 +263,6 @@ class RedisRolloutWorker:
         return model
 
     def select_gamemode(self, equal_likelihood):
-
         emp_weight = {
             k: self.mean_exp_grant[k] / (sum(self.mean_exp_grant.values()) + 1e-8)
             for k in self.mean_exp_grant.keys()
@@ -354,7 +355,7 @@ class RedisRolloutWorker:
                     self.streamer_mode and self.deterministic_streamer
                 ):
                     self.current_agent.deterministic = True
-                current_iteration = self.redis.get(ITERATION_LATEST)
+                current_iteration = int(self.redis.get(ITERATION_LATEST))
 
             n += 1
 
@@ -397,7 +398,7 @@ class RedisRolloutWorker:
                 non_pretrained_idxs = []
                 for i, version in enumerate(versions):
                     if version == -1:
-                        versions[i] = -current_iteration
+                        versions[i] = current_iteration
                         agents.append(self.current_agent)
                         latest_version_idxs.append(i)
                         non_pretrained_idxs.append(i)
@@ -430,7 +431,6 @@ class RedisRolloutWorker:
             self.set_team_size(blue, orange)
 
             if not self.streamer_mode:
-
                 table_str = self.make_table(
                     versions, ratings, blue, orange, streamer=False
                 )
@@ -440,7 +440,8 @@ class RedisRolloutWorker:
                 )
 
             if evaluate and not self.streamer_mode and self.human_agent is None:
-                print(colored("EVALUATION GAME", "magenta") + table_str)
+                if not self.silent_mode:
+                    print(colored("EVALUATION GAME", "magenta") + table_str)
                 result = rocket_learn.utils.generate_episode.generate_episode(
                     self.env,
                     agents,
@@ -449,16 +450,18 @@ class RedisRolloutWorker:
                     scoreboard=self.scoreboard,
                     progress=self.live_progress,
                     eval_setter=self.eval_setter,
+                    silent_mode=self.silent_mode,
                     v=v,
                 )
                 rollouts = []
-                print(
-                    colored("Evaluation finished, goal differential:", "magenta"),
-                    result,
-                )
-                print()
+                if not self.silent_mode:
+                    print(
+                        colored("Evaluation finished, goal differential:", "magenta"),
+                        result,
+                    )
+                    print()
             else:
-                if not self.streamer_mode:
+                if not self.streamer_mode and not self.silent_mode:
                     print(colored("ROLLOUT\n", "magenta") + table_str)
 
                 try:
@@ -472,6 +475,7 @@ class RedisRolloutWorker:
                         versions,
                         evaluate=False,
                         scoreboard=self.scoreboard,
+                        silent_mode=self.silent_mode,
                         v=v,
                     )
 
@@ -499,7 +503,7 @@ class RedisRolloutWorker:
                     post_stats += f", goal speed: {goal_speed:.2f} kph\nScoreline is {int(state.blue_score)} - {int(state.orange_score)}\nDifferential is {int(state.blue_score)- int(state.orange_score)}"
                 # print(post_stats)
 
-                if not self.streamer_mode:
+                if not self.streamer_mode and not self.silent_mode:
                     print(post_stats)
                     print()
 
@@ -542,8 +546,11 @@ class RedisRolloutWorker:
             if evaluate:
                 all_aux_labels = None
 
-            if not self.streamer_mode and not self.batch_mode:
+            # Use latest version instead of iteration number for version when passing to rollout generator
+            for idx in latest_version_idxs:
+                versions[idx] = latest_version
 
+            if not self.streamer_mode and not self.batch_mode:
                 rollout_data = encode_buffers(
                     rollouts,
                     all_aux_labels,
@@ -586,7 +593,6 @@ class RedisRolloutWorker:
                 # time.sleep(0.01)
 
             elif not self.streamer_mode and self.batch_mode:
-
                 rollout_data = encode_buffers(
                     rollouts,
                     all_aux_labels,
