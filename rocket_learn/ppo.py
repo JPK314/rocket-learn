@@ -230,7 +230,9 @@ class PPO:
 
                 self.frozen_iterations -= 1
             else:
-                self.rollout_generator.update_parameters(self.agent.actor, iteration)
+                self.rollout_generator.update_parameters(
+                    self.agent.actor, self.agent.critic, iteration
+                )
 
             # calculate years for graph
             if self.tick_skip_starts is not None:
