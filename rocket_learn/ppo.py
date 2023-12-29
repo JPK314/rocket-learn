@@ -18,6 +18,7 @@ from torch.nn.utils import clip_grad_norm_
 from rocket_learn.agent.actor_critic_agent import ActorCriticAgent
 from rocket_learn.experience_buffer import ExperienceBuffer
 from rocket_learn.rollout_generator.base_rollout_generator import BaseRolloutGenerator
+from torch.optim.lr_scheduler import CyclicLR
 
 
 class PPO:
@@ -96,6 +97,8 @@ class PPO:
         self.keep_saved_aux_weights = keep_saved_aux_weights
         self.aux_weight_max_change = aux_weight_max_change
         self.agent.actor.aux_heads = device_aux_heads
+        self.param_group_names = ["actor", "critic"]
+        self.scheduler = CyclicLR(self.agent.optimizer, base_lr=0.00015, max_lr=0.0005, step_size_up=100, step_size_down=300, mode='triangular', cycle_momentum=False)
         if not aux_heads_log_names:
             aux_heads_log_names = [
                 f"ppo/aux_head_{idx+1}"
@@ -252,57 +255,8 @@ class PPO:
                     "ppo/total_timesteps": self.total_steps,
                 }
             )
-            # print(f"fps: {self.n_steps / (t1 - t0)}\ttotal steps: {self.total_steps}")
+            print(f"fps: {self.n_steps / (t1 - t0)}")
             seconds = self.total_steps * 8 / 120
-            # def convert_time(seconds):
-            #    minute, second = divmod(seconds, 60)
-            #    hour, minute = divmod(minute, 60)
-            #    day, hour = divmod(hour, 24)
-            #    month, day = divmod(day, 30)
-            #    year, month = divmod(month, 12)
-            #    return (int(year), int(month), int(day), int(hour), int(minute), int(second))
-            #
-            # def convert_steps(total_steps):
-            #    if total_steps < 1000:
-            #        return total_steps, ""
-            #    elif 1000 <= total_steps < 1000000:
-            #        return total_steps / 1000, "K"
-            #    elif 1000000 <= total_steps < 1000000000:
-            #        return total_steps / 1000000, "M"
-            #    else:
-            #        return total_steps / 1000000000, "B"
-            # def color_table_pink(table):
-            #    for i in range(len(table._rows)):
-            #        for j in range(len(table._field_names)):
-            #            table._rows[i][j] = colored(table._rows[i][j], 'magenta') # Change The Color Here
-            #    return table
-            # times = convert_time(seconds)
-            # steps, step_unit = convert_steps(self.total_steps)
-            # x = PrettyTable()
-            # x.field_names = ["Unit", "Value", "Steps"]
-            # x.add_row(["", "", ""])
-            # x.add_row([colored("Finesse Has Trained For", 'yellow', attrs=['bold']), "", ""])
-            # x.add_row(["", "", ""])
-            # x.add_row([colored("Years", 'magenta', attrs=['bold']), colored(times[0], 'magenta', attrs=['bold']), ""])
-            # x.add_row([colored("Months", 'magenta', attrs=['bold']), colored(times[1], 'magenta', attrs=['bold']), ""])
-            # x.add_row([colored("Days", 'magenta', attrs=['bold']), colored(times[2], 'magenta', attrs=['bold']), ""])
-            # x.add_row([colored("Hours", 'magenta', attrs=['bold']), colored(times[3], 'magenta', attrs=['bold']), ""])
-            # x.add_row([colored("Minutes", 'magenta', attrs=['bold']), colored(times[4], 'magenta', attrs=['bold']), ""])
-            # x.add_row([colored("Seconds", 'magenta', attrs=['bold']), colored(times[5], 'magenta', attrs=['bold']), ""])
-            # x.add_row([colored("Steps", 'magenta', attrs=['bold']), colored(format(steps, ".2f"), 'magenta', attrs=['bold']), step_unit])
-            # x.add_row([colored("SPS", 'magenta', attrs=['bold']), colored(format(self.n_steps / (t1 - t0), ".2f"), 'magenta', attrs=['bold']), ""])
-            # print(color_table_pink(x))
-            # writer = tf.summary.create_file_writer("logs/PPO_0")
-            # with writer.as_default():
-            # tf.summary.scalar("ppo/steps_per_second", self.n_steps / (t1 - t0), step=self.total_steps)
-            # tf.summary.scalar("ppo/total_timesteps", self.total_steps, step=self.total_steps)
-            # tf.summary.scalar("time/time_elapsed", int(time_elapsed), step=iteration)
-
-            # pr.disable()
-            # s = io.StringIO()
-            # sortby = pstats.SortKey.CUMULATIVE
-            # ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
-            # ps.dump_stats(f"profile_{self.total_steps}")
 
     def set_logger(self, logger):
         self.logger = logger
@@ -708,6 +662,13 @@ class PPO:
                 clip_grad_norm_(self.agent.actor.parameters(), self.max_grad_norm)
 
             self.agent.optimizer.step()
+        
+        ### SCHEDULING OPTIMIZER ###
+        self.scheduler.step()
+        for i, group in enumerate(self.agent.optimizer.param_groups):
+            name = self.param_group_names[i] if i < len(self.param_group_names) else f"group_{i}"
+            self.logger.log({f"learning-rates/CyclicLR_{name}": group['lr']}, step=iteration, commit=False)
+
 
         self.hist_main_loss_grads.append(main_loss_total_grad)
         for hist_aux_loss_grad, aux_loss_total_grad in zip(
